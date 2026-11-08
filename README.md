@@ -2,8 +2,6 @@
 
 Weather-aware truck route planning and comparison. React + Django, arrival-time forecasts, distance-based exposure, a gridded corridor forecast and optional AI driver briefings.
 
-> **Repository status:** This initial publication contains only the README. Application source, configuration, tests and deployment files are currently maintained locally and have not yet been published. The setup instructions below apply once the source is available.
-
 ## Run locally
 
 Requirements: Python 3.11+, Node.js 24, npm. No database or Docker is needed for development.
@@ -16,13 +14,16 @@ npm ci
 cd ..
 ```
 
-Copy `.env.example` to a private `.env` file if one does not already exist, then fill in the credentials you need. `.env` is excluded from Git. Never overwrite an existing credentials file.
+Create a private `.env` file at the project root if one does not already exist, then fill in your TomTom key:
 
-```powershell
-pwsh -File scripts/dev.ps1
+```dotenv
+DJANGO_DEBUG=true
+TOMTOM_API_KEY=your-tomtom-api-key
 ```
 
-Open **http://127.0.0.1:5173/**. The script runs both servers; Ctrl+C stops them. Alternatively, run these in separate terminals:
+`.env` is excluded from Git. Preserve existing credentials when updating it. Development mode generates a temporary Django secret if one is not configured; production requires a private `DJANGO_SECRET_KEY` and `DJANGO_DEBUG=false`.
+
+Start the backend and frontend in separate terminals from the project root:
 
 ```powershell
 .\.venv\Scripts\python.exe backend\manage.py runserver 127.0.0.1:8000 --noreload
@@ -33,29 +34,31 @@ cd frontend
 npm run dev
 ```
 
-Restart the backend after changing `.env`. Stop any earlier servers before running the combined script. Build scripts invoke Node directly so Windows paths containing spaces or `&` work.
+Open **http://127.0.0.1:5173/**. Stop each server with Ctrl+C, and restart the backend after changing `.env`. The frontend build helper invokes Node directly so Windows paths containing spaces or `&` work.
 
-## Demo and live data
+## Live routing and weather
 
-The app starts with a **clearly labeled demonstration**: three recorded road paths from Chicago to Denver, with synthetic time-varying weather. These are OSRM **driving** fixtures, not proof of truck-legal routes. Via Sioux Falls and via Kansas City provide geographically distinct alternatives. No routing or weather credentials are needed for demos.
+The app opens directly to the live planner. It makes no automatic analysis request on page load. Demo tabs and scenario controls are removed; synthetic requests are rejected by the public API. Internal policy fixtures remain available only to the automated test process.
 
-Scenarios: storm trade-off, clear weather, all routes blocked, missing western forecasts, and a 45 mph wind / payload-boundary case. Change the scenario or payload and click **Update route analysis**.
-
-For live analysis:
+To plan a trip:
 
 1. Set `TOMTOM_API_KEY` in `.env`; restart the backend.
-2. Select **Live APIs** and choose both locations from the search results.
+2. Choose both locations from the search results.
 3. Choose a current/future departure, timezone, payload and 10/25/50-mile interval.
 
 **Open-Meteo's public API is keyless.** It needs no account or API key. The public endpoint's non-commercial terms and quotas apply. A custom commercial endpoint can be configured separately when needed; the public endpoint is sufficient for non-commercial development.
 
 Live mode never falls back to demonstration weather or geometry. Missing credentials produce an explicit error. Failed/missing forecasts stay Unknown. The current acceptance geography is the contiguous United States (input bounds are validated).
 
+Live route discovery requests the primary truck route plus up to five alternatives, then keeps three distinct candidates. Trips whose endpoints are more than 750 km apart initially request two alternatives with a 30-second read budget; shorter trips use the usual 12-second budget. This avoids asking the provider to calculate six long-distance paths before showing any result. If fewer than three remain, the search tries circular through-areas on either side of the primary road corridor, with the same departure and truck profile. It admits at most five logical route queries within 32 seconds; each optional query has a timeout of at most five seconds. Brief connection failures or server errors may be retried once within each query's remaining budget. Read timeouts, credentials errors and rate limits are reported explicitly. These are admission/read budgets, not a strict total wall-clock deadline.
+
+Duplicate paths, substantial exact road retracing, and routes exceeding 1.75 times the baseline distance or twice its duration are excluded. These are search bounds, not proof that other routes do not exist. A partial search preserves usable results and reports its limits; it never duplicates a route to fill three cards.
+
 ## Optional AI briefing
 
 The route decision is calculated before any model call. Briefings load independently:
 
-**Amazon Bedrock â†’ Groq â†’ calculated explanation**.
+**Amazon Bedrock → Groq → calculated explanation**.
 
 - For Bedrock, configure an AWS credential profile locally or an IAM instance role on EC2. Set `BEDROCK_ENABLED=true`, the region, and `BEDROCK_MODEL_ID` (default `amazon.nova-micro-v1:0`). Verify model access, inference quota and credit eligibility.
 - For Groq, set `GROQ_API_KEY` and `GROQ_MODEL` to a model available on your account. Availability and free-plan limits can vary.
@@ -69,15 +72,15 @@ AI calls have bounded timeouts, a daily application request allowance, small tok
 
 | Hazard           | Low   | Moderate     | High         | Severe      | No Travel |
 | ---------------- | ----- | ------------ | ------------ | ----------- | --------- |
-| Wind mph         | <25   | 25â€“<35     | 35â€“<45     | 45â€“<55    | â‰¥55     |
-| Rain in/hr       | <0.10 | 0.10â€“<0.25 | 0.25â€“<0.50 | 0.50â€“1.00 | >1.00     |
-| Fresh snow in/hr | <0.5  | 0.5â€“<1     | 1â€“<2       | 2â€“3       | >3        |
+| Wind mph         | <25   | 25–<35     | 35–<45     | 45–<55    | ≥55     |
+| Rain in/hr       | <0.10 | 0.10–<0.25 | 0.25–<0.50 | 0.50–1.00 | >1.00     |
+| Fresh snow in/hr | <0.5  | 0.5–<1     | 1–<2       | 2–3       | >3        |
 
 Shared precipitation boundaries enter the higher class, except the strictly greater No Travel thresholds. Values are not rounded before classification. Sustained wind drives the policy; gusts are displayed separately.
 
-Load rules: â‰¥55 mph blocks any load; 45â€“<55 mph plus payload >30,000 lb is No Travel; 35â€“<45 mph plus payload >40,000 lb is Severe. Exactly 30,000/40,000 lb does not escalate. Simultaneous hazards take the maximum, retaining all tied reasons.
+Load rules: ≥55 mph blocks any load; 45–<55 mph plus payload >30,000 lb is No Travel; 35–<45 mph plus payload >40,000 lb is Severe. Exactly 30,000/40,000 lb does not escalate. Simultaneous hazards take the maximum, retaining all tied reasons.
 
-Live truck routing assumes a **35,000 lb tare**, plus the entered payload, and dimensions **4.11 m high Ã— 2.6 m wide Ã— 21.64 m long**. These are default vehicle assumptions; they do not verify a particular truck. The UI accepts 0â€“80,000 lb of cargo as an application input range, not a statement of legal payload limits. ETAs exclude breaks/rest stops.
+Live truck routing assumes a **35,000 lb tare**, plus the entered payload, and dimensions **4.11 m high × 2.6 m wide × 21.64 m long**. These are default vehicle assumptions; they do not verify a particular truck. The UI accepts 0–80,000 lb of cargo as an application input range, not a statement of legal payload limits. ETAs exclude breaks/rest stops.
 
 ### Geometry and ETA
 
@@ -95,7 +98,7 @@ Departure local time is resolved using the chosen IANA zone. Nonexistent dayligh
 
 ### Recommendation
 
-Exclude blocked/incomplete routes. Among eligible routes, compare **Severe distance â†’ High distance â†’ distance-weighted ordinal average â†’ duration** lexicographically, with stable route identity as the final tie-break. Ordinal codes are 0â€“4; they are not probabilities. If every route is blocked/incomplete, recommendation ID is null.
+Exclude blocked/incomplete routes. Among eligible routes, compare **Severe distance → High distance → distance-weighted ordinal average → duration** lexicographically, with stable route identity as the final tie-break. Ordinal codes are 0–4; they are not probabilities. If every route is blocked/incomplete, recommendation ID is null.
 
 The explanation compares the selected option with the fastest eligible competitor and reports the actual deciding criterion. A small deciding exposure is not rounded to zero during selection.
 
@@ -118,7 +121,7 @@ All frames load together. Scrubbing changes map data locally, without new API re
 | POST   | `/api/analyses/{id}/corridor` | Forecast for `route_id`                  |
 | POST   | `/api/analyses/{id}/briefing` | Optional narration of server-owned facts |
 
-Additional API examples are maintained in `docs/api.md` with the unpublished source. Analyses expire after 30 minutes or on server/cache restart. Expiration returns 410; already displayed analysis data remains usable. Provider errors never echo credential-bearing URLs.
+Request validation and endpoint behavior are defined in `backend/routing/api.py`, with examples in `backend/routing/tests/test_api.py`. Analyses expire after 30 minutes or on server/cache restart. Expiration returns 410; already displayed analysis data remains usable. Provider errors never echo credential-bearing URLs.
 
 ## Verification
 
@@ -129,15 +132,26 @@ npm run test
 npm run build
 ```
 
-Tests do not depend on live services. They cover thresholds, load rules, unknown data, eligibility, distance conservation, nonuniform ETA, forecast interval matching, timezone transitions, provider parsing, API orchestration and AI fallback.
+The backend and frontend unit tests above do not depend on live services. They cover thresholds, load rules, unknown data, eligibility, distance conservation, nonuniform ETA, forecast interval matching, timezone transitions, provider parsing, API orchestration and AI fallback.
 
-Desktop/mobile browser scenarios are included in the local source under `frontend/e2e`. Browser testing and visual map verification remain pending.
+Browser regressions in `frontend/e2e/planner.spec.ts` run against the development servers started above. From `frontend`, install Playwright's Chromium browser once, then run the desktop/mobile suite:
 
-Local verification includes 53 backend tests, 18 frontend tests, a production frontend build and a Linux Docker build. Live TomTom route analysis, keyless Open-Meteo forecasts and a Groq briefing have also been exercised. Real Bedrock inference and AWS deployment remain pending.
+```powershell
+node node_modules/@playwright/test/cli.js install chromium
+npm run test:e2e
+```
+
+The suite uses `http://127.0.0.1:5173` by default; set `PREVIEW_URL` to target another running app. No separate QA server is required.
+
+Live acceptance cases are in `frontend/e2e/live.spec.ts`. After `npm run build`, start the configured backend and run `npm run test:live` from `frontend`. The suite uses `http://127.0.0.1:8000` by default, or `LIVE_URL` when set. It uses installed Chrome by default; set `PLAYWRIGHT_CHANNEL=chromium` to use the browser installed above. It calls real routing and weather providers, saves raw evidence under the ignored `.cache/` directory, and independently checks checkpoint risk, route ranking and corridor frames. Review forecast-selected dates before rerunning.
+
+Build output, test reports and caches are generated locally and excluded from Git. Removing them does not change application source; builds and test runs recreate the outputs they need. Real Bedrock inference and public deployment remain pending.
 
 ## AWS deployment
 
-Deployment instructions are maintained in `deploy/README.md` with the unpublished source. The CloudFormation template provisions one EC2 instance, IAM instance role, encrypted EBS, public IPv4, a CloudFront distribution and origin access restrictions. Configuration is held in Secrets Manager. CloudFront provides a generated `https://â€¦cloudfront.net` address; **no domain purchase is needed**.
+`deploy/aws.yaml` defines the CloudFormation stack, and `deploy/deploy.py` prepares or launches it. The template provisions one EC2 instance, IAM instance role, encrypted EBS, public IPv4, a CloudFront distribution and origin access restrictions. Configuration is held in Secrets Manager. CloudFront provides a generated `https://<distribution>.cloudfront.net` address; **no domain purchase is needed**.
+
+The deployment helper requires a published container image URI. Without `--deploy`, it prints a preparation summary and makes no AWS calls. Adding `--deploy` creates or updates AWS resources using the configured credential chain. The image-publishing workflow in `.github/workflows/image.yml` runs manually; `.github/workflows/ci.yml` checks the backend, frontend and container build.
 
 The deployment uses one application instance. AWS, TomTom and Groq usage is subject to each provider's pricing, quotas and account limits.
 
@@ -147,6 +161,6 @@ Cloud provisioning and public HTTPS verification are pending.
 
 - [TomTom routing](https://docs.tomtom.com/routing-api/documentation/tomtom-maps/v1/calculate-route), [geocoding](https://docs.tomtom.com/geocoding-api/documentation/tomtom-maps/v1/geocode).
 - [Open-Meteo](https://open-meteo.com/), [field definitions](https://open-meteo.com/en/docs), [usage terms](https://open-meteo.com/en/terms). Forecast data is CC BY 4.0; values are converted, matched and sampled by this application.
-- [OpenFreeMap](https://openfreemap.org/) and Â© OpenStreetMap contributors provide the map data; [MapLibre](https://maplibre.org/) renders it.
-- Demo geometry was recorded from the [OSRM](https://project-osrm.org/) public driving router on 2026-11-08, using Â© OpenStreetMap contributors' data. Demo weather is synthetic.
+- [OpenFreeMap](https://openfreemap.org/) and © OpenStreetMap contributors provide the map data; [MapLibre](https://maplibre.org/) renders it.
+- Internal test-fixture geometry was recorded from the [OSRM](https://project-osrm.org/) public driving router on 2026-11-08, using © OpenStreetMap contributors' data. Internal weather fixtures are synthetic and are not used by the public application.
 - [Amazon Bedrock Nova Micro](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-micro.html), [Groq models](https://console.groq.com/docs/models).
