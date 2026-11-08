@@ -1,0 +1,7 @@
+node_modules
+frontend/dist
+.venv
+.env
+backend/routing/fixtures
+backend/requirements.lock
+frontend/package-lock.json
