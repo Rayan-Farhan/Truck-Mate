@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: TruckMate - single EC2 container with IAM role and a generated CloudFront HTTPS address. No custom domain.
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+  CloudFrontPrefixListId:
+    Type: String
+  ImageUri:
+    Type: String
+    Description: Public container image, preferably pinned by immutable digest.
+    AllowedPattern: '[a-zA-Z0-9./:@_-]+'
+  SettingsSecretArn:
+    Type: String
+    Description: Secrets Manager secret containing the dotenv configuration as text.
+  OriginToken:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+  BedrockModelId:
+    Type: String
+    Default: amazon.nova-micro-v1:0
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium]
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+Resources:
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: ec2.amazonaws.com}
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: TruckMateRuntime
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref SettingsSecretArn
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref AppRole]
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Only CloudFront may access the HTTP origin; administration uses SSM.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId: !Ref CloudFrontPrefixListId
+  PublicIp:
+    Type: AWS::EC2::EIP
+    Properties: {Domain: vpc}
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      CreditSpecification: {CPUCredits: standard}
+      MetadataOptions: {HttpTokens: required, HttpPutResponseHopLimit: 2}
+      NetworkInterfaces:
+        - DeviceIndex: '0'
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SubnetId
+          GroupSet: [!Ref SecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: {VolumeSize: 20, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true}
+      Tags:
+        - {Key: Name, Value: !Sub '${AWS::StackName}-app'}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eu
+          dnf install -y docker awscli2
+          systemctl enable --now docker amazon-ssm-agent
+          install -d -m 700 /opt/truckmate
+          printf '%s\n' '${ImageUri}' > /opt/truckmate/image-uri
+          cat > /opt/truckmate/start.sh <<'SCRIPT'
+          #!/bin/bash
+          set -eu
+          umask 077
+          aws secretsmanager get-secret-value --region '${AWS::Region}' --secret-id '${SettingsSecretArn}' --query SecretString --output text > /opt/truckmate/.env
+          TOKEN=$(curl --fail --silent --max-time 5 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' http://169.254.169.254/latest/api/token)
+          PUBLIC_HOST=$(curl --fail --silent --max-time 5 -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-hostname)
+          test -n "$PUBLIC_HOST"
+          IMAGE=$(cat /opt/truckmate/image-uri)
+          docker pull "$IMAGE"
+          docker rm -f truckmate 2>/dev/null || true
+          docker run -d --name truckmate --restart unless-stopped --cap-drop ALL --security-opt no-new-privileges --log-opt max-size=10m --log-opt max-file=3 --env-file /opt/truckmate/.env -e DJANGO_DEBUG=false -e "DJANGO_ALLOWED_HOSTS=$PUBLIC_HOST,localhost,127.0.0.1" -e AWS_REGION='${AWS::Region}' -p 80:8000 "$IMAGE"
+          SCRIPT
+          chmod 700 /opt/truckmate/start.sh
+          # The deployment helper starts this after EIP association and checks health.
+          cat > /etc/systemd/system/truckmate.service <<'UNIT'
+          [Unit]
+          Description=TruckMate container
+          After=docker.service network-online.target
+          Requires=docker.service
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/opt/truckmate/start.sh
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          systemctl daemon-reload
+          systemctl enable truckmate
+  IpAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      InstanceId: !Ref Instance
+      AllocationId: !GetAtt PublicIp.AllocationId
+  NoCache:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub '${AWS::StackName}-dynamic'
+        DefaultTTL: 0
+        MaxTTL: 0
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: false
+          CookiesConfig: {CookieBehavior: none}
+          HeadersConfig: {HeaderBehavior: none}
+          QueryStringsConfig: {QueryStringBehavior: none}
+  OriginRequests:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub '${AWS::StackName}-origin'
+        CookiesConfig: {CookieBehavior: none}
+        HeadersConfig: {HeaderBehavior: allExcept, Headers: [host]}
+        QueryStringsConfig: {QueryStringBehavior: all}
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: IpAssociation
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub 'TruckMate ${AWS::StackName}'
+        PriceClass: PriceClass_100
+        HttpVersion: http2
+        IPV6Enabled: true
+        Origins:
+          - Id: application
+            DomainName: !GetAtt Instance.PublicDnsName
+            OriginCustomHeaders:
+              - {HeaderName: X-TruckMate-Origin, HeaderValue: !Ref OriginToken}
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+              OriginReadTimeout: 60
+        DefaultCacheBehavior:
+          TargetOriginId: application
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: !Ref NoCache
+          OriginRequestPolicyId: !Ref OriginRequests
+        ViewerCertificate: {CloudFrontDefaultCertificate: true}
+Outputs:
+  Url:
+    Value: !Sub 'https://${Distribution.DomainName}'
+  InstanceId:
+    Value: !Ref Instance
+  DistributionId:
+    Value: !Ref Distribution
+  SettingsSecretArn:
+    Value: !Ref SettingsSecretArn
