@@ -1,0 +1,26 @@
+anyio==4.16.0
+asgiref==3.13.0
+boto3==1.43.126
+botocore==1.43.126
+certifi==2026.10.23
+Django==5.2.19
+djangorestframework==3.16.1
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+jmespath==1.1.0
+numpy==2.4.6
+pyproj==3.7.2
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.4
+s3transfer==0.19.3
+shapely==2.1.2
+six==1.17.0
+sqlparse==0.6.1
+typing_extensions==4.16.0
+tzdata==2026.6
+urllib3==2.8.0
+whitenoise==6.12.0
+gunicorn==23.0.0; sys_platform != "win32"
+packaging==25.0
