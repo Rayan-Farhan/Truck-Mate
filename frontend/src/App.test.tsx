@@ -161,4 +161,44 @@ describe('Planning workspace integration', () => {
     await screen.findByText('Provider temporarily unavailable');
     expect(screen.getByText('Recommended', { exact: true })).toBeInTheDocument();
   });
+  it('generates a briefing on request and keeps the calculated recommendation visible', async () => {
+    vi.mocked(api.config).mockResolvedValue({ live_routing: true, bedrock: true, groq: true });
+    vi.mocked(api.briefing).mockResolvedValue({
+      source: 'groq',
+      model: 'test-model',
+      text: 'Review the checkpoint weather before departing on the recommended corridor.',
+      note: 'AI briefing',
+    });
+    mount();
+    const button = await screen.findByRole('button', { name: 'Generate briefing' });
+    expect(api.briefing).not.toHaveBeenCalled();
+    fireEvent.click(button);
+    await screen.findByText('AI briefing · Groq');
+    expect(api.briefing).toHaveBeenCalledWith('fixture-28000', expect.any(AbortSignal));
+    expect(screen.getByText('Northern corridor has fewer Severe miles.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Select Southern corridor' }));
+    expect(api.briefing).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByLabelText('PAYLOAD WEIGHT'), { target: { value: '28001' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Update route analysis' }));
+    await waitFor(() => expect(screen.queryByText('AI briefing · Groq')).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Generate briefing' })).toBeInTheDocument();
+  });
+  it('labels a calculated fallback without claiming it is AI generated', async () => {
+    vi.mocked(api.config).mockResolvedValue({ live_routing: true, bedrock: false, groq: true });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate briefing' }));
+    await screen.findByText('Calculated explanation · AI briefing unavailable');
+    expect(screen.getByText('The calculated route avoids elevated exposure.')).toBeInTheDocument();
+    expect(screen.queryByText('AI briefing · Groq')).not.toBeInTheDocument();
+  });
+  it('allows a failed briefing to retry without recalculating the trip', async () => {
+    vi.mocked(api.config).mockResolvedValue({ live_routing: true, bedrock: false, groq: true });
+    vi.mocked(api.briefing).mockRejectedValueOnce(new Error('Network unavailable'));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Generate briefing' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry briefing' }));
+    await screen.findByText('Calculated explanation · AI briefing unavailable');
+    expect(api.briefing).toHaveBeenCalledTimes(2);
+    expect(api.analyze).toHaveBeenCalledTimes(1);
+  });
 });

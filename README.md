@@ -42,15 +42,15 @@ The backend separates provider integrations, geometry, risk calculations and pre
 
 TruckMate runs in **Sydney (`ap-southeast-2`)**. The HTTPS site serves the frontend and API through CloudFront, backed by one EC2 instance running the application container.
 
-| Service             | Purpose                                                                           |
-| ------------------- | --------------------------------------------------------------------------------- |
-| Amazon CloudFront   | Public HTTPS access to the application                                            |
-| Amazon EC2          | Runs the Docker container                                                         |
-| Amazon ECR          | Stores private application images with immutable version tags                     |
-| AWS Secrets Manager | Holds server configuration and application secrets                                |
-| AWS IAM             | Gives the instance and delivery workflow scoped access to AWS services            |
-| AWS Systems Manager | Updates the running image and restores the previous image after a failed startup  |
-| Amazon Bedrock      | Optional Amazon Nova Micro driver briefings, subject to available inference quota |
+| Service             | Purpose                                                                            |
+| ------------------- | ---------------------------------------------------------------------------------- |
+| Amazon CloudFront   | Public HTTPS access to the application                                             |
+| Amazon EC2          | Runs the Docker container                                                          |
+| Amazon ECR          | Stores private application images with immutable version tags                      |
+| AWS Secrets Manager | Holds server configuration and application secrets                                 |
+| AWS IAM             | Gives the instance and delivery workflow scoped access to AWS services             |
+| AWS Systems Manager | Updates the running image and restores the previous image after a failed startup   |
+| Amazon Bedrock      | Optional Amazon Nova 2 Lite driver briefings, subject to available inference quota |
 
 Application secrets stay on the server. GitHub Actions authenticates to AWS using short-lived **OIDC credentials**. Delivery uses immutable image digests, serializes deployments and checks application health, with rollback after a failed public health check. The current setup uses a single instance, so updates can cause brief restart downtime.
 
@@ -118,7 +118,7 @@ A stable route identity resolves exact ties. If no route is eligible, TruckMate 
 
 The selected route has a **20-mile buffer on each side**, sampled on an adaptive grid with 49 forecast frames from departure through +48 hours. The slider explores this surrounding weather field; route colors and recommendations continue to represent conditions at checkpoint arrival times. Unknown grid values are shown in gray.
 
-Optional briefings follow **Amazon Bedrock → Groq → calculated explanation**. Models receive compact trip facts and their responses are checked for supported references and numerical claims. They do not determine route rankings. Timeouts, caching and application request limits bound AI calls; generated prose can still contain errors.
+Select **Generate briefing** after planning a trip to request an optional driver briefing. Briefings follow **Amazon Bedrock → Groq → calculated explanation**, and the interface identifies the source. They load separately from the map and route comparison. Models receive compact trip facts and their responses are checked for supported references and numerical claims. They do not determine route rankings. Timeouts, caching and application request limits bound AI calls; generated prose can still contain errors.
 
 ## Known limitations
 
@@ -132,7 +132,7 @@ Optional briefings follow **Amazon Bedrock → Groq → calculated explanation**
 - **[TomTom](https://docs.tomtom.com/routing-api/documentation/tomtom-maps/v1/calculate-route):** truck routing and [geocoding](https://docs.tomtom.com/geocoding-api/documentation/tomtom-maps/v1/geocode).
 - **[Open-Meteo](https://open-meteo.com/en/docs):** wind, rain and snowfall forecasts. Forecast data is CC BY 4.0; the public API's [non-commercial terms and quotas](https://open-meteo.com/en/terms) apply.
 - **[OpenFreeMap](https://openfreemap.org/), © OpenStreetMap contributors and [MapLibre](https://maplibre.org/):** basemap data and rendering.
-- **[Amazon Nova Micro](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-micro.html) and [Groq](https://console.groq.com/docs/models):** optional language-model integrations.
+- **[Amazon Nova](https://docs.aws.amazon.com/nova/latest/userguide/what-is-nova.html) and [Groq](https://console.groq.com/docs/models):** optional language-model integrations.
 - Internal route fixtures use geometry recorded from [OSRM](https://project-osrm.org/) on November 8, 2026, using © OpenStreetMap contributors' data. Synthetic weather fixtures are confined to automated tests.
 
 ## Run locally
@@ -160,7 +160,7 @@ TOMTOM_API_KEY=your-tomtom-api-key
 
 The TomTom key enables live location search and routing. Open-Meteo's public forecast endpoint needs no key. `.env` is excluded from Git; preserve any existing credentials when editing it. Development mode generates a temporary Django secret automatically.
 
-AI briefings are optional. To use Bedrock locally, configure an AWS credential profile and set `BEDROCK_ENABLED=true`, `AWS_REGION` and `BEDROCK_MODEL_ID` in `.env`. For Groq, set `GROQ_API_KEY` and `GROQ_MODEL`. Without either service, the calculated explanation remains available.
+AI briefings are optional. To use Bedrock locally, configure an AWS credential profile and set `BEDROCK_ENABLED=true`, `AWS_REGION` and `BEDROCK_MODEL_ID` in `.env`. Nova 2 Lite uses an inference profile, such as `global.amazon.nova-2-lite-v1:0`, rather than its base model ID. For Groq, set `GROQ_API_KEY` and `GROQ_MODEL`. Without either service, the calculated explanation remains available.
 
 ### Start the app
 

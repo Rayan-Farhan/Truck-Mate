@@ -37,6 +37,7 @@ const RouteMap = lazy(() => import('./components/RouteMap').then((module) => ({ 
 import { Timeline } from './components/Timeline';
 import { CheckpointPanel } from './components/CheckpointPanel';
 import { MapBoundary } from './components/MapBoundary';
+import { DriverBriefing } from './components/DriverBriefing';
 
 const CHICAGO = { label: 'Chicago, IL', lat: 41.8781, lon: -87.6298 };
 const DENVER = { label: 'Denver, CO', lat: 39.7392, lon: -104.9903 };
@@ -486,6 +487,9 @@ export default function App() {
                 </span>
               </div>
             </div>
+            {analysis && (config.data?.bedrock || config.data?.groq) && (
+              <DriverBriefing key={analysis.id} analysisId={analysis.id} />
+            )}
             <div className="map-legend">
               <span>
                 {layer === 'risk'

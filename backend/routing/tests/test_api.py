@@ -278,7 +278,11 @@ class BriefingTests(SimpleTestCase):
         self.assertEqual(result["source"], "calculated")
         self.assertEqual(result["text"], self.analysis["explanation"]["text"])
 
-    @override_settings(BEDROCK_ENABLED=True, GROQ_API_KEY="test-key")
+    @override_settings(
+        BEDROCK_ENABLED=True,
+        GROQ_API_KEY="test-key",
+        GROQ_MODEL="llama-3.3-70b-versatile",
+    )
     @patch("routing.briefings.CLIENT.post")
     @patch("routing.briefings.boto3.client", side_effect=RuntimeError("Unavailable"))
     def test_bedrock_failure_uses_groq(self, bedrock, post):
@@ -300,6 +304,57 @@ class BriefingTests(SimpleTestCase):
             ]
         }
         self.assertEqual(briefing(self.analysis)["source"], "groq")
+        self.assertEqual(
+            post.call_args.kwargs["json"]["response_format"], {"type": "json_object"}
+        )
+
+    @override_settings(
+        BEDROCK_ENABLED=False, GROQ_API_KEY="test-key", GROQ_MODEL="openai/gpt-oss-120b"
+    )
+    @patch("routing.briefings.CLIENT.post")
+    def test_reasoning_model_uses_strict_schema_for_decision_and_fact_references(
+        self, post
+    ):
+        import json
+
+        for identity in [self.analysis["recommended_route_id"], None]:
+            with self.subTest(recommended_route=identity):
+                cache.clear()
+                self.analysis["recommended_route_id"] = identity
+                post.return_value.json.return_value = {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "route_id": identity,
+                                        "summary": (
+                                            "Review the checkpoint forecasts on the recommended route."
+                                            if identity
+                                            else "No route is recommended. Review the weather warnings before planning travel."
+                                        ),
+                                        "fact_ids": [],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+                result = briefing(self.analysis)
+                self.assertEqual(result["source"], "groq")
+                payload = post.call_args.kwargs["json"]
+                schema = payload["response_format"]["json_schema"]
+                self.assertTrue(schema["strict"])
+                self.assertEqual(
+                    schema["schema"]["properties"]["route_id"]["enum"], [identity]
+                )
+                self.assertEqual(
+                    schema["schema"]["properties"]["fact_ids"]["items"]["enum"],
+                    list(self.facts["fact_catalog"]),
+                )
+                self.assertEqual(payload["reasoning_effort"], "low")
+                self.assertEqual(payload["max_completion_tokens"], 1024)
+                self.assertNotIn("max_tokens", payload)
 
     @override_settings(BEDROCK_ENABLED=True, GROQ_API_KEY="test-key")
     @patch("routing.briefings.CLIENT.post", side_effect=RuntimeError("Unavailable"))

@@ -747,6 +747,46 @@ select {
 .no-recommendation {
   border-color: var(--border);
 }
+.driver-briefing {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.briefing-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.briefing-heading h3 {
+  font-size: 12px;
+  font-weight: 600;
+}
+.briefing-heading button {
+  color: var(--accent-text);
+  text-decoration: underline;
+}
+.briefing-heading button:disabled {
+  opacity: 0.65;
+}
+.briefing-source {
+  display: block;
+  margin-top: 6px;
+  color: var(--accent-text);
+  font-size: 10px;
+}
+.driver-briefing p {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.driver-briefing small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+}
 .no-recommendation .recommendation-icon {
   background: var(--accent-soft);
   color: var(--accent-text);
