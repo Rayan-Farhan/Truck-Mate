@@ -134,7 +134,7 @@ npm run build
 
 The backend and frontend unit tests above do not depend on live services. They cover thresholds, load rules, unknown data, eligibility, distance conservation, nonuniform ETA, forecast interval matching, timezone transitions, provider parsing, API orchestration and AI fallback.
 
-Browser regressions in `frontend/e2e/planner.spec.ts` run against the development servers started above. From `frontend`, install Playwright's Chromium browser once, then run the desktop/mobile suite:
+Browser regressions in `frontend/e2e/planner.spec.ts` start the frontend automatically and mock API responses. From `frontend`, install Playwright's Chromium browser once, then run the desktop/mobile suite:
 
 ```powershell
 node node_modules/@playwright/test/cli.js install chromium
@@ -143,19 +143,44 @@ npm run test:e2e
 
 The suite uses `http://127.0.0.1:5173` by default; set `PREVIEW_URL` to target another running app. No separate QA server is required.
 
-Live acceptance cases are in `frontend/e2e/live.spec.ts`. After `npm run build`, start the configured backend and run `npm run test:live` from `frontend`. The suite uses `http://127.0.0.1:8000` by default, or `LIVE_URL` when set. It uses installed Chrome by default; set `PLAYWRIGHT_CHANNEL=chromium` to use the browser installed above. It calls real routing and weather providers, saves raw evidence under the ignored `.cache/` directory, and independently checks checkpoint risk, route ranking and corridor frames. Review forecast-selected dates before rerunning.
+Live acceptance cases are in `frontend/e2e/live.spec.ts`. After `npm run build`, start the configured backend and run `npm run test:live` from `frontend`. The suite uses `http://127.0.0.1:8000` by default, or `LIVE_URL` when set. It uses installed Chrome by default; set `PLAYWRIGHT_CHANNEL=chromium` to use the browser installed above. It calls real routing and weather providers, saves raw evidence under ignored `test-results/`, and independently checks checkpoint risk, route ranking and corridor frames. Review forecast-selected dates before rerunning.
 
-Build output, test reports and caches are generated locally and excluded from Git. Removing them does not change application source; builds and test runs recreate the outputs they need. Real Bedrock inference and public deployment remain pending.
+Build output and test reports are generated locally and excluded from Git. Public HTTPS, live routing and the corridor forecast have been verified on AWS. Bedrock inference remains subject to the account's applied quotas; the application keeps its calculated explanation when AI services are unavailable.
 
 ## AWS deployment
 
-`deploy/aws.yaml` defines the CloudFormation stack, and `deploy/deploy.py` prepares or launches it. The template provisions one EC2 instance, IAM instance role, encrypted EBS, public IPv4, a CloudFront distribution and origin access restrictions. Configuration is held in Secrets Manager. CloudFront provides a generated `https://<distribution>.cloudfront.net` address; **no domain purchase is needed**.
+The existing AWS setup uses one EC2 instance running Docker, private ECR images, Secrets Manager settings and a CloudFront HTTPS address. Infrastructure and the server's startup configuration are managed in AWS. GitHub Actions updates the application's image; it does not provision infrastructure or store application secrets in GitHub. **No domain purchase is needed.**
 
-The deployment helper requires a published container image URI. Without `--deploy`, it prints a preparation summary and makes no AWS calls. Adding `--deploy` creates or updates AWS resources using the configured credential chain. The image-publishing workflow in `.github/workflows/image.yml` runs manually; `.github/workflows/ci.yml` checks the backend, frontend and container build.
+There are exactly two workflows:
+
+- **`ci.yml`** tests backend and frontend, runs controlled desktop/mobile browser checks and checks the Docker container on pull requests and `main`. It needs no production credentials or live API calls.
+- **`cd.yml`** handles versioned delivery and GitHub Releases. It verifies the tagged commit with CI, builds and checks the image, pushes it to private ECR, deploys its immutable digest when enabled, checks public health and records the version on GitHub. Standard Docker and AWS CLI commands live directly in the workflow; there are no custom deployment programs.
+
+AWS access uses short-lived GitHub OIDC credentials. The `release` environment has scoped ECR publishing access, and `production` can invoke the existing Systems Manager command for this application. Both environments are restricted to `main` and version tags. Configure these repository variables in GitHub Settings → Secrets and variables → Actions:
+
+| Variable | Purpose |
+| --- | --- |
+| `AWS_REGION` | `ap-southeast-2` for this deployment |
+| `ECR_REPOSITORY` | Private repository name, currently `truckmate` |
+| `APP_STACK` | Existing application stack, currently `truckmate` |
+| `AWS_PUBLISH_ROLE_ARN` | OIDC role for private-image publishing |
+| `AWS_DEPLOY_ROLE_ARN` | OIDC role for updating the application |
+| `DEPLOY_ENABLED` | `true` to deploy; `false` to publish while keeping production paused |
+
+To release, update the frontend version and lockfile together with `npm version VERSION --no-git-tag-version` from `frontend`, commit and merge the change to `main`, then push a matching annotated tag, for example:
+
+```powershell
+git tag -a v1.0.0 -m "TruckMate v1.0.0"
+git push origin v1.0.0
+```
+
+The tag must match `frontend/package.json` and point to a commit on `main`. ECR version tags are immutable, and images carry the source commit label. Existing versions are retrieved and checked rather than rebuilt. GitHub Releases contain notes and `image.json` with the commit/digest; the actual image stays in private ECR, so GitHub Packages remains empty.
+
+For redeployment or rollback, run **Actions → CD → Run workflow** from `main` and enter an existing published version. The workflow retrieves that version's original image. The AWS Systems Manager command `truckmate-deploy-image` retains the previous digest and restores it after a local startup failure; CD also requests rollback if public health checks fail. Its configuration is managed in AWS. Concurrent delivery runs are serialized. A stopped EC2 instance is never started by CD; start it separately before enabling production deployment.
 
 The deployment uses one application instance. AWS, TomTom and Groq usage is subject to each provider's pricing, quotas and account limits.
 
-Cloud provisioning and public HTTPS verification are pending.
+Hosted address: [TruckMate](https://d1fmez7o5mdp8o.cloudfront.net). This is a single-instance setup with brief restart downtime during updates. Successful deployment does not imply that Bedrock inference quotas have been granted.
 
 ## Sources and attribution
 

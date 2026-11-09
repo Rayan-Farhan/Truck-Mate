@@ -1,36 +1,77 @@
-name: Verify
-on: [push, pull_request, workflow_dispatch]
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        default: ''
 permissions:
   contents: read
 jobs:
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       DJANGO_DEBUG: 'true'
       DJANGO_SECRET_KEY: ci-only-not-for-deployment
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: '3.11', cache: pip, cache-dependency-path: backend/requirements.lock}
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.lock
       - run: pip install -r backend/requirements.lock
       - run: python backend/manage.py check
       - run: python backend/manage.py test routing.tests
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
-      run: {working-directory: frontend}
+      run:
+        working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: {node-version: '24', cache: npm, cache-dependency-path: frontend/package-lock.json}
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - run: npm ci --no-audit --no-fund
       - run: npm run test
       - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
   container:
-    runs-on: ubuntu-latest
+    # CD checks its final image itself after calling the backend/frontend checks.
+    if: inputs.source_ref == ''
     needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with: {context: '.', push: false, tags: 'truckmate:ci'}
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - run: docker build --platform linux/amd64 -t truckmate:ci .
+      - name: Check the built container
+        run: |
+          set -euo pipefail
+          container=$(docker run --rm -d -p 127.0.0.1::8000 -e DJANGO_SECRET_KEY=ci-image-check-only -e DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1 truckmate:ci)
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          url="http://$(docker port "$container" 8000/tcp)"
+          for attempt in {1..30}; do
+            if curl --fail --silent --max-time 5 "$url/api/health" | jq -e '.status == "ok"' >/dev/null; then break; fi
+            sleep 1
+          done
+          curl --fail --silent --max-time 5 "$url/api/health" | jq -e '.status == "ok"'
+          curl --fail --silent --max-time 5 "$url/" --output "$RUNNER_TEMP/index.html"
+          grep -oE '(src|href)="/assets/[^\"]+"' "$RUNNER_TEMP/index.html" | cut -d '"' -f 2 | while read -r asset; do
+            curl --fail --silent --max-time 5 "$url$asset" --output /dev/null
+          done
+          docker inspect "$container" | jq -e '.[0].Config | (.User != "" and (.User | test("^(root|0)(:|$)") | not)) and all(.Env[]; test("^AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN)=") | not)'

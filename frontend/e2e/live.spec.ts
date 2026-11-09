@@ -30,7 +30,7 @@ function assess(w: any, weight: number) {
   };
 }
 async function record(id: string, suffix: string, data: unknown) {
-  const directory = resolve(process.cwd(), '../.cache/qa/live-trip-records');
+  const directory = resolve(process.cwd(), '../test-results/live-trip-records');
   await mkdir(directory, { recursive: true });
   await writeFile(resolve(directory, `${id}-${suffix}.json`), JSON.stringify(data, null, 2));
 }
