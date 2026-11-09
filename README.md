@@ -42,17 +42,20 @@ The backend separates provider integrations, geometry, risk calculations and pre
 
 TruckMate runs in **Sydney (`ap-southeast-2`)**. The HTTPS site serves the frontend and API through CloudFront, backed by one EC2 instance running the application container.
 
-| Service             | Purpose                                                                            |
-| ------------------- | ---------------------------------------------------------------------------------- |
-| Amazon CloudFront   | Public HTTPS access to the application                                             |
-| Amazon EC2          | Runs the Docker container                                                          |
-| Amazon ECR          | Stores private application images with immutable version tags                      |
-| AWS Secrets Manager | Holds server configuration and application secrets                                 |
-| AWS IAM             | Gives the instance and delivery workflow scoped access to AWS services             |
-| AWS Systems Manager | Updates the running image and restores the previous image after a failed startup   |
-| Amazon Bedrock      | Optional Amazon Nova 2 Lite driver briefings, subject to available inference quota |
+| Service                | Purpose                                                                            |
+| ---------------------- | ---------------------------------------------------------------------------------- |
+| Amazon CloudFront      | Public HTTPS access to the application                                             |
+| Amazon EC2             | Runs the Docker container                                                          |
+| Amazon CloudWatch Logs | Collects application, service and CloudFront access logs with seven-day retention  |
+| Amazon ECR             | Stores private application images with immutable version tags                      |
+| AWS Secrets Manager    | Holds server configuration and application secrets                                 |
+| AWS IAM                | Gives the instance and delivery workflow scoped access to AWS services             |
+| AWS Systems Manager    | Updates the running image and restores the previous image after a failed startup   |
+| Amazon Bedrock         | Optional Amazon Nova 2 Lite driver briefings, subject to available inference quota |
 
 Application secrets stay on the server. GitHub Actions authenticates to AWS using short-lived **OIDC credentials**. Delivery uses immutable image digests, serializes deployments and checks application health, with rollback after a failed public health check. The current setup uses a single instance, so updates can cause brief restart downtime.
+
+In CloudWatch **Logs → Log groups**, select Sydney for `/truckmate/application` (Docker output) and `/truckmate/service` (systemd startup and deployment logs). CloudFront standard access logs use `truckmate-cloudfront` in **N. Virginia (`us-east-1`)**. A CloudWatch agent collects the instance logs, and CloudFront uses standard logging v2. All three groups retain logs for seven days.
 
 Two workflows handle verification and delivery:
 
