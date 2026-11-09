@@ -1,0 +1,199 @@
+name: CD
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published version to redeploy or roll back to, for example v1.0.0
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: truckmate-delivery
+  cancel-in-progress: false
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - name: Validate the version and its source
+        id: version
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then test "$GITHUB_REF" = refs/heads/main; fi
+          git fetch origin main
+          sha=$(git rev-parse "$VERSION^{commit}")
+          git merge-base --is-ancestor "$sha" origin/main
+          git checkout --detach "$sha"
+          test "v$(jq -r .version frontend/package.json)" = "$VERSION"
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$VERSION" > "$RUNNER_TEMP/release.json" 2> "$RUNNER_TEMP/api-error"; then
+            gh release download "$VERSION" --pattern image.json --dir "$RUNNER_TEMP"
+            test "$(jq -r .commit "$RUNNER_TEMP/image.json")" = "$sha"
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || ! grep -q 'HTTP 404' "$RUNNER_TEMP/api-error"; then
+            cat "$RUNNER_TEMP/api-error" >&2
+            exit 1
+          fi
+          echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    with:
+      source_ref: ${{ needs.version.outputs.sha }}
+  image:
+    needs: [version, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    env:
+      VERSION: ${{ needs.version.outputs.tag }}
+      SOURCE_SHA: ${{ needs.version.outputs.sha }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: false
+      - name: Build or retrieve the immutable private image
+        id: image
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          registry="$account.dkr.ecr.$AWS_REGION.amazonaws.com"
+          export DOCKER_CONFIG
+          DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/docker.XXXXXX")
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+          tagged="$registry/$ECR_REPOSITORY:$VERSION"
+          if digest=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids "imageTag=$VERSION" --query 'imageDetails[0].imageDigest' --output text 2> "$RUNNER_TEMP/image-error"); then
+            docker pull "$tagged"
+          elif [[ "$GITHUB_EVENT_NAME" == push ]] && grep -q ImageNotFoundException "$RUNNER_TEMP/image-error"; then
+            docker build --platform linux/amd64 --label "org.opencontainers.image.revision=$SOURCE_SHA" -t "$tagged" .
+          else
+            cat "$RUNNER_TEMP/image-error" >&2
+            exit 1
+          fi
+          test "$(docker inspect "$tagged" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_SHA"
+          container=$(docker run --rm -d -p 127.0.0.1::8000 -e DJANGO_SECRET_KEY=ci-image-check-only -e DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1 "$tagged")
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
+          url="http://$(docker port "$container" 8000/tcp)"
+          for attempt in {1..30}; do
+            if curl --fail --silent --max-time 5 "$url/api/health" | jq -e '.status == "ok"' >/dev/null; then break; fi
+            sleep 1
+          done
+          curl --fail --silent --max-time 5 "$url/api/health" | jq -e '.status == "ok"'
+          curl --fail --silent --max-time 5 "$url/" --output "$RUNNER_TEMP/index.html"
+          grep -oE '(src|href)="/assets/[^\"]+"' "$RUNNER_TEMP/index.html" | cut -d '"' -f 2 | while read -r asset; do
+            curl --fail --silent --max-time 5 "$url$asset" --output /dev/null
+          done
+          docker inspect "$container" | jq -e '.[0].Config | (.User != "" and (.User | test("^(root|0)(:|$)") | not)) and all(.Env[]; test("^AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN)=") | not)'
+          if [[ -z "${digest:-}" ]]; then docker push "$tagged"; fi
+          digest=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" --image-ids "imageTag=$VERSION" --query 'imageDetails[0].imageDigest' --output text)
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "image=$registry/$ECR_REPOSITORY@$digest" >> "$GITHUB_OUTPUT"
+  deploy:
+    if: vars.DEPLOY_ENABLED == 'true'
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Deploy and verify, restoring the previous image on failure
+        id: deploy
+        env:
+          IMAGE: ${{ needs.image.outputs.image }}
+          APP_STACK: ${{ vars.APP_STACK }}
+        run: |
+          set -euo pipefail
+          stack=$(aws cloudformation describe-stacks --stack-name "$APP_STACK" --query 'Stacks[0].Outputs' --output json)
+          instance=$(jq -r '.[] | select(.OutputKey=="InstanceId") | .OutputValue' <<< "$stack")
+          url=$(jq -r '.[] | select(.OutputKey=="Url") | .OutputValue' <<< "$stack")
+          test "$(aws ec2 describe-instances --instance-ids "$instance" --query 'Reservations[0].Instances[0].State.Name' --output text)" = running
+          run_change() {
+            local command deadline result status
+            command=$(aws ssm send-command --instance-ids "$instance" --document-name "$APP_STACK-deploy-image" --parameters "ImageUri=$IMAGE,Action=$1" --timeout-seconds 60 --query Command.CommandId --output text) || return 1
+            deadline=$((SECONDS+660))
+            while (( SECONDS < deadline )); do
+              if result=$(aws ssm get-command-invocation --command-id "$command" --instance-id "$instance" --cli-connect-timeout 5 --cli-read-timeout 10 --output json 2> "$RUNNER_TEMP/command-error"); then
+                status=$(jq -r .Status <<< "$result")
+                case "$status" in
+                  Success) return 0 ;;
+                  Pending|InProgress|Delayed) ;;
+                  *) jq -r '.StandardOutputContent, .StandardErrorContent' <<< "$result" >&2; return 1 ;;
+                esac
+              elif ! grep -q InvocationDoesNotExist "$RUNNER_TEMP/command-error"; then
+                cat "$RUNNER_TEMP/command-error" >&2; return 1
+              fi
+              sleep 5
+            done
+            return 1
+          }
+          healthy() {
+            local deadline=$((SECONDS+60))
+            while (( SECONDS < deadline )); do
+              if curl --fail --silent --max-time 5 "$url/api/health" | jq -e '.status == "ok"' >/dev/null && curl --fail --silent --max-time 5 "$url/" --output /dev/null; then return 0; fi
+              sleep 5
+            done
+            return 1
+          }
+          run_change deploy
+          if ! healthy; then
+            echo 'Public health failed; restoring the previous image.' >&2
+            run_change rollback && healthy || { echo 'Rollback verification failed; inspect the server.' >&2; exit 1; }
+            exit 1
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+  release:
+    if: always() && needs.image.result == 'success' && (needs.deploy.result == 'success' || needs.deploy.result == 'skipped')
+    needs: [version, image, deploy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Record the version on GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.tag }}
+          SOURCE_SHA: ${{ needs.version.outputs.sha }}
+          IMAGE: ${{ needs.image.outputs.image }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          DEPLOYMENT: ${{ needs.deploy.result == 'success' && 'deployed' || 'paused' }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GH_REPO/releases/tags/$VERSION" >/dev/null 2> "$RUNNER_TEMP/release-error"; then exit 0; fi
+          grep -q 'HTTP 404' "$RUNNER_TEMP/release-error"
+          jq -n --arg version "$VERSION" --arg commit "$SOURCE_SHA" --arg image "$IMAGE" --arg region "$AWS_REGION" --arg deployment "$DEPLOYMENT" '{version:$version,commit:$commit,image:$image,region:$region,deployment:$deployment}' > "$RUNNER_TEMP/image.json"
+          args=()
+          [[ "$VERSION" != *-* ]] || args+=(--prerelease)
+          gh release create "$VERSION" "$RUNNER_TEMP/image.json" --verify-tag --title "TruckMate $VERSION" --generate-notes --notes "Verified private ECR image. Production deployment: $DEPLOYMENT. The attached image.json records the source commit and immutable digest." "${args[@]}"

@@ -1,6 +1,12 @@
 import { test, expect } from '@playwright/test';
 
 // Controlled form regressions; live provider acceptance is in live.spec.ts.
+test.beforeEach(async ({ page }) => {
+  await page.route('**/api/config', (route) => route.fulfill({
+    json: { live_routing: true, bedrock: false, groq: false },
+  }));
+});
+
 test('opens a live planner without demo controls or automatic analysis', async ({ page }) => {
   let analyses = 0;
   page.on('request', (r) => {
