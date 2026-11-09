@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: GitHub OIDC, scoped image publishing/deployment roles, and a constrained deployment command.
+Parameters:
+  AppStackName:
+    Type: String
+    Default: truckmate
+    AllowedPattern: '[A-Za-z][A-Za-z0-9-]{0,39}'
+  EcrRepositoryName:
+    Type: String
+    Default: truckmate
+    AllowedPattern: '[a-z0-9]+([/_-][a-z0-9]+)*'
+  GitHubSubjectPrefix:
+    Type: String
+    Description: Exact sub_claim_prefix returned by GitHub's OIDC customization API.
+    AllowedPattern: 'repo:[A-Za-z0-9_.@/-]+'
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ''
+Conditions:
+  CreateProvider: !Equals [!Ref ExistingOidcProviderArn, '']
+Resources:
+  GitHubProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+  PublishRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AppStackName}-github-publish'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateProvider, !Ref GitHubProvider, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub '${GitHubSubjectPrefix}:environment:release'
+      Policies:
+        - PolicyName: PublishPrivateImage
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action: [ecr:DescribeRepositories, ecr:DescribeImages, ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability, ecr:InitiateLayerUpload, ecr:UploadLayerPart, ecr:CompleteLayerUpload, ecr:PutImage]
+                Resource: !Sub 'arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrRepositoryName}'
+  DeploymentDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub '${AppStackName}-deploy-image'
+      DocumentType: Command
+      UpdateMethod: NewVersion
+      Content:
+        schemaVersion: '2.2'
+        description: Deploy a fixed private image and restore the previous image on local health failure.
+        parameters:
+          ImageUri:
+            type: String
+            interpolationType: ENV_VAR
+            allowedPattern: !Sub '^${AWS::AccountId}[.]dkr[.]ecr[.]${AWS::Region}[.]amazonaws[.]com/${EcrRepositoryName}@sha256:[a-f0-9]{64}$'
+          Action:
+            type: String
+            default: deploy
+            allowedValues: [deploy, rollback]
+            interpolationType: ENV_VAR
+        mainSteps:
+          - action: aws:runShellScript
+            name: deployPrivateImage
+            precondition:
+              StringEquals: [platformType, Linux]
+            inputs:
+              timeoutSeconds: '600'
+              runCommand:
+                - |
+                  #!/bin/bash
+                  set -euo pipefail
+                  umask 077
+                  STATE=/opt/truckmate
+                  test -x "$STATE/start.sh"
+                  exec 9>"$STATE/deployment.lock"
+                  flock -w 10 9
+                  candidate="$SSM_ImageUri"
+                  repository="${candidate%@*}"
+                  valid_image() {
+                    [[ "${1%@*}" == "$repository" ]] && [[ "${1##*@}" =~ ^sha256:[a-f0-9]{64}$ ]]
+                  }
+                  activate() {
+                    printf '%s\n' "$1" > "$STATE/image-uri.next" || return 1
+                    mv -f "$STATE/image-uri.next" "$STATE/image-uri" || return 1
+                    systemctl restart truckmate
+                  }
+                  healthy() {
+                    for i in $(seq 1 30); do
+                      if curl --fail --silent --max-time 2 http://localhost/api/health >/dev/null; then
+                        if docker inspect truckmate | python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; sys.exit(0 if c["Config"]["Image"]==sys.argv[1] and c["State"]["Running"] else 1)' "$1"; then
+                          return 0
+                        fi
+                      fi
+                      sleep 2
+                    done
+                    return 1
+                  }
+                  current=$(cat "$STATE/image-uri")
+                  valid_image "$current"
+                  if [[ "$SSM_Action" == rollback ]]; then
+                    test "$current" = "$candidate"
+                    previous=$(cat "$STATE/previous-image-uri")
+                    valid_image "$previous"
+                    activate "$previous"
+                    healthy "$previous"
+                    echo PUBLIC_HEALTH_ROLLBACK_OK
+                    exit 0
+                  fi
+                  if [[ "$current" == "$candidate" ]]; then
+                    printf '%s\n' "$current" > "$STATE/previous-image-uri"
+                    healthy "$candidate"
+                    echo IMAGE_ALREADY_DEPLOYED
+                    exit 0
+                  fi
+                  printf '%s\n' "$current" > "$STATE/previous-image-uri"
+                  if activate "$candidate" && healthy "$candidate"; then
+                    echo IMAGE_DEPLOYED
+                  else
+                    if activate "$current" && healthy "$current"; then
+                      echo LOCAL_HEALTH_ROLLBACK_OK
+                    else
+                      echo ROLLBACK_FAILED >&2
+                    fi
+                    exit 1
+                  fi
+  DeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AppStackName}-github-deploy'
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateProvider, !Ref GitHubProvider, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub '${GitHubSubjectPrefix}:environment:production'
+      Policies:
+        - PolicyName: DeployTruckMateImage
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppStackName}/*'
+              - Effect: Allow
+                Action: [ec2:DescribeInstances, ssm:GetCommandInvocation]
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref AWS::Region
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:document/${DeploymentDocument}'
+              - Effect: Allow
+                Action: ssm:SendCommand
+                Resource: !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*'
+                Condition:
+                  StringEquals:
+                    ssm:resourceTag/Name: !Sub '${AppStackName}-app'
+Outputs:
+  PublishRoleArn:
+    Value: !GetAtt PublishRole.Arn
+  DeployRoleArn:
+    Value: !GetAtt DeployRole.Arn
+  DeployDocument:
+    Value: !Ref DeploymentDocument

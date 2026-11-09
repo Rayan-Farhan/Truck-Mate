@@ -9,8 +9,12 @@ Parameters:
     Type: String
   ImageUri:
     Type: String
-    Description: Public container image, preferably pinned by immutable digest.
+    Description: Private ECR image in this account and region, pinned by immutable digest.
     AllowedPattern: '[a-zA-Z0-9./:@_-]+'
+  EcrRepositoryName:
+    Type: String
+    Description: Existing private ECR repository from which this instance may pull images.
+    AllowedPattern: '[a-z0-9]+([._/-][a-z0-9]+)*'
   SettingsSecretArn:
     Type: String
     Description: Secrets Manager secret containing the dotenv configuration as text.
@@ -45,6 +49,15 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrRepositoryName}
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !Ref SettingsSecretArn
@@ -89,20 +102,26 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          set -eu
-          dnf install -y docker awscli2
+          set -euo pipefail
+          dnf install -y docker awscli-2
           systemctl enable --now docker amazon-ssm-agent
           install -d -m 700 /opt/truckmate
           printf '%s\n' '${ImageUri}' > /opt/truckmate/image-uri
           cat > /opt/truckmate/start.sh <<'SCRIPT'
           #!/bin/bash
-          set -eu
+          set -euo pipefail
           umask 077
           aws secretsmanager get-secret-value --region '${AWS::Region}' --secret-id '${SettingsSecretArn}' --query SecretString --output text > /opt/truckmate/.env
           TOKEN=$(curl --fail --silent --max-time 5 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' http://169.254.169.254/latest/api/token)
           PUBLIC_HOST=$(curl --fail --silent --max-time 5 -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-hostname)
           test -n "$PUBLIC_HOST"
           IMAGE=$(cat /opt/truckmate/image-uri)
+          REGISTRY=$(printf '%s' "$IMAGE" | cut -d/ -f1)
+          # Authenticate afresh on every start. Remove the short-lived Docker token on exit.
+          DOCKER_CONFIG=$(mktemp -d /run/truckmate-ecr.XXXXXX)
+          export DOCKER_CONFIG
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          aws ecr get-login-password --region '${AWS::Region}' | docker login --username AWS --password-stdin "$REGISTRY"
           docker pull "$IMAGE"
           docker rm -f truckmate 2>/dev/null || true
           docker run -d --name truckmate --restart unless-stopped --cap-drop ALL --security-opt no-new-privileges --log-opt max-size=10m --log-opt max-file=3 --env-file /opt/truckmate/.env -e DJANGO_DEBUG=false -e "DJANGO_ALLOWED_HOSTS=$PUBLIC_HOST,localhost,127.0.0.1" -e AWS_REGION='${AWS::Region}' -p 80:8000 "$IMAGE"

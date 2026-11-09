@@ -1,0 +1,125 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag, for example v1.0.0
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: truckmate-release
+  cancel-in-progress: false
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.version.outputs.sha }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - name: Validate version and main-branch ancestry
+        id: version
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]
+          git fetch origin main
+          sha=$(git rev-parse "$RELEASE_TAG^{commit}")
+          git merge-base --is-ancestor "$sha" origin/main
+          git checkout --detach "$sha"
+          python3 -c 'import json,os; assert "v"+json.load(open("frontend/package.json"))["version"]==os.environ["RELEASE_TAG"], "Tag must match package version"'
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'Release already exists. Use Deploy to redeploy or roll back an existing release.' >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+  verify:
+    needs: source
+    uses: ./.github/workflows/ci.yml
+    with:
+      source_ref: ${{ needs.source.outputs.sha }}
+      build_container: false
+  publish:
+    needs: [source, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: backend/requirements.lock
+      - run: pip install -r backend/requirements.lock
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          mask-aws-account-id: false
+      - name: Build, check and publish the same image
+        id: image
+        env:
+          RELEASE_TAG: ${{ needs.source.outputs.tag }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          python deploy/publish.py --push --existing-only --region "$AWS_REGION" --repository "$ECR_REPOSITORY" --tag "$RELEASE_TAG-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --revision "$SOURCE_SHA" --metadata-file "$RUNNER_TEMP/image.json"
+          python -c 'import json,os; print("image="+json.load(open(os.environ["RUNNER_TEMP"]+"/image.json"))["image"])' >> "$GITHUB_OUTPUT"
+  deploy:
+    if: vars.DEPLOY_ENABLED == 'true'
+    needs: publish
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy.yml
+    with:
+      image: ${{ needs.publish.outputs.image }}
+  release:
+    if: always() && needs.publish.result == 'success' && (needs.deploy.result == 'success' || needs.deploy.result == 'skipped')
+    needs: [source, publish, deploy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+      - name: Publish GitHub Release with immutable image metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.source.outputs.tag }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+          IMAGE: ${{ needs.publish.outputs.image }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          DEPLOY_STATUS: ${{ needs.deploy.result == 'success' && 'deployed' || 'paused' }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json,os,pathlib
+          record={"version":os.environ["RELEASE_TAG"],"commit":os.environ["SOURCE_SHA"],"image":os.environ["IMAGE"],"region":os.environ["AWS_REGION"],"deployment":os.environ["DEPLOY_STATUS"],"workflow_run":"https://github.com/"+os.environ["GITHUB_REPOSITORY"]+"/actions/runs/"+os.environ["GITHUB_RUN_ID"]}
+          root=pathlib.Path(os.environ["RUNNER_TEMP"])
+          (root/"image.json").write_text(json.dumps(record,indent=2)+"\n")
+          (root/"release.md").write_text("Verified Linux AMD64 image published to private Amazon ECR. The attached image.json records the source commit and immutable image digest.\n\nProduction deployment: **"+record["deployment"]+"**.\n")
+          PY
+          args=()
+          [[ "$RELEASE_TAG" != *-* ]] || args+=(--prerelease)
+          gh release create "$RELEASE_TAG" "$RUNNER_TEMP/image.json" --verify-tag --title "TruckMate $RELEASE_TAG" --generate-notes --notes-file "$RUNNER_TEMP/release.md" "${args[@]}"

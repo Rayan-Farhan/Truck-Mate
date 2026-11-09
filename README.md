@@ -1,5 +1,8 @@
 # TruckMate
 
+[![Verify](https://github.com/Rayan-Farhan/Truck-Mate/actions/workflows/ci.yml/badge.svg)](https://github.com/Rayan-Farhan/Truck-Mate/actions/workflows/ci.yml)
+[Releases](https://github.com/Rayan-Farhan/Truck-Mate/releases)
+
 Weather-aware truck route planning and comparison. React + Django, arrival-time forecasts, distance-based exposure, a gridded corridor forecast and optional AI driver briefings.
 
 ## Run locally
@@ -145,17 +148,17 @@ The suite uses `http://127.0.0.1:5173` by default; set `PREVIEW_URL` to target a
 
 Live acceptance cases are in `frontend/e2e/live.spec.ts`. After `npm run build`, start the configured backend and run `npm run test:live` from `frontend`. The suite uses `http://127.0.0.1:8000` by default, or `LIVE_URL` when set. It uses installed Chrome by default; set `PLAYWRIGHT_CHANNEL=chromium` to use the browser installed above. It calls real routing and weather providers, saves raw evidence under the ignored `.cache/` directory, and independently checks checkpoint risk, route ranking and corridor frames. Review forecast-selected dates before rerunning.
 
-Build output, test reports and caches are generated locally and excluded from Git. Removing them does not change application source; builds and test runs recreate the outputs they need. Real Bedrock inference and public deployment remain pending.
+Build output, test reports and caches are generated locally and excluded from Git. Removing them does not change application source; builds and test runs recreate the outputs they need. Public AWS deployment is verified. Real Bedrock inference remains blocked by the account's zero applied Nova Micro token quota in Sydney; the hosted briefing check returned the calculated fallback.
 
 ## AWS deployment
 
 `deploy/aws.yaml` defines the CloudFormation stack, and `deploy/deploy.py` prepares or launches it. The template provisions one EC2 instance, IAM instance role, encrypted EBS, public IPv4, a CloudFront distribution and origin access restrictions. Configuration is held in Secrets Manager. CloudFront provides a generated `https://<distribution>.cloudfront.net` address; **no domain purchase is needed**.
 
-The deployment helper requires a published container image URI. Without `--deploy`, it prints a preparation summary and makes no AWS calls. Adding `--deploy` creates or updates AWS resources using the configured credential chain. The image-publishing workflow in `.github/workflows/image.yml` runs manually; `.github/workflows/ci.yml` checks the backend, frontend and container build.
+`deploy/publish.py --push` builds, checks and uploads the image to **private Amazon ECR**. The server pulls it using its IAM role. Version tags trigger GitHub verification and private-image publishing, deployment when `DEPLOY_ENABLED=true`, and a GitHub Release with the source commit and immutable image digest. GitHub authenticates to AWS through scoped OIDC roles, with no stored AWS access keys. Follow [the deployment guide](deploy/README.md) and [CI/CD guide](deploy/CICD.md) for setup, publishing and rollback. GitHub Packages stays empty because the container registry is private AWS ECR.
 
 The deployment uses one application instance. AWS, TomTom and Groq usage is subject to each provider's pricing, quotas and account limits.
 
-Cloud provisioning and public HTTPS verification are pending.
+Hosted address: **[TruckMate](https://d1fmez7o5mdp8o.cloudfront.net)**. **EC2 is temporarily stopped and production deployment is disabled.** The retained Sydney (`ap-southeast-2`) deployment passed public HTTPS health, frontend assets, redirect, three evaluated Chicago–Milwaukee routes and 49 corridor forecast positions on November 9, 2026. Its container runs as a non-root user without embedded AWS access keys. AI capability flags indicate configuration rather than successful inference; the Bedrock quota request is pending.
 
 ## Sources and attribution
 

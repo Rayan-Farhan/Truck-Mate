@@ -4,6 +4,7 @@ Run from the project venv. Uses the AWS credential chain; never embeds access ke
 """
 
 import argparse
+import base64
 from pathlib import Path
 import re
 import secrets
@@ -17,15 +18,36 @@ from dotenv import dotenv_values
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def private_ecr_image(image, region):
+    """Validate the image before any AWS mutation or remote shell command."""
+    match = re.fullmatch(
+        r"(?P<registry>(?P<account>\d{12})\.dkr\.ecr\."
+        r"(?P<region>[a-z0-9-]+)\.amazonaws\.com(?:\.cn)?)/"
+        r"(?P<repository>[a-z0-9]+(?:[._/-][a-z0-9]+)*)"
+        r"(?:(?::(?P<tag>[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}))"
+        r"|(?:@(?P<digest>sha256:[a-f0-9]{64})))",
+        image,
+    )
+    if not match:
+        raise ValueError("Use a private ECR image URI with a tag or sha256 digest.")
+    details = match.groupdict()
+    if details["region"] != region:
+        raise ValueError(
+            "The private ECR image and deployment must use the same region."
+        )
+    return details
+
+
 def main():
+    env = {k: v for k, v in dotenv_values(ROOT / ".env").items() if v is not None}
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--image",
         required=True,
-        help="Public GHCR/ECR image URI, preferably pinned by digest",
+        help="Private ECR image URI in this account/region, preferably pinned by digest",
     )
     parser.add_argument("--stack", default="truckmate")
-    parser.add_argument("--region", default="us-east-1")
+    parser.add_argument("--region", default=env.get("AWS_REGION") or "us-east-1")
     parser.add_argument("--profile")
     parser.add_argument("--vpc-id")
     parser.add_argument("--subnet-id")
@@ -35,9 +57,11 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,39}", args.stack):
         parser.error("Use a simple stack name of at most 40 characters.")
-    if not re.fullmatch(r"[a-zA-Z0-9./:@_-]+", args.image):
-        parser.error("Invalid image URI.")
-    env = {k: v for k, v in dotenv_values(ROOT / ".env").items() if v is not None}
+    try:
+        image = private_ecr_image(args.image, args.region)
+    except ValueError as exc:
+        parser.error(str(exc))
+    print(f"Region: {args.region}. Private image: {args.image}")
     print(
         "Plan: one t3.small EC2, 20 GiB encrypted EBS, public IPv4, Secrets Manager, CloudFront and runtime IAM role."
     )
@@ -54,9 +78,23 @@ def main():
             "Fill TOMTOM_API_KEY in .env before deploying the live application."
         )
     session = boto3.Session(profile_name=args.profile, region_name=args.region)
-    session.client(
-        "sts"
-    ).get_caller_identity()  # Credential preflight, no account identifiers logged.
+    identity = session.client("sts").get_caller_identity()
+    if image["account"] != identity["Account"]:
+        parser.error("Use a private ECR repository owned by the deployment account.")
+    # Resolve tags before creating resources so a deploy/rollback always uses fixed bytes.
+    image_id = (
+        {"imageDigest": image["digest"]}
+        if image["digest"]
+        else {"imageTag": image["tag"]}
+    )
+    published = session.client("ecr").describe_images(
+        registryId=image["account"],
+        repositoryName=image["repository"],
+        imageIds=[image_id],
+    )["imageDetails"][0]
+    args.image = f"{image['registry']}/{image['repository']}@{published['imageDigest']}"
+    template = (ROOT / "deploy" / "aws.yaml").read_text()
+    session.client("cloudformation").validate_template(TemplateBody=template)
     ec2 = session.client("ec2")
     vpcs = (
         ec2.describe_vpcs(Filters=[{"Name": "is-default", "Values": ["true"]}])["Vpcs"]
@@ -125,13 +163,14 @@ def main():
         "SubnetId": subnet,
         "CloudFrontPrefixListId": prefixes[0]["PrefixListId"],
         "ImageUri": args.image,
+        "EcrRepositoryName": image["repository"],
         "SettingsSecretArn": arn,
         "OriginToken": origin_token,
         "BedrockModelId": env.get("BEDROCK_MODEL_ID", "amazon.nova-micro-v1:0"),
     }
     request = {
         "StackName": args.stack,
-        "TemplateBody": (ROOT / "deploy" / "aws.yaml").read_text(),
+        "TemplateBody": template,
         "Parameters": [
             {"ParameterKey": k, "ParameterValue": v} for k, v in parameters.items()
         ],
@@ -168,25 +207,35 @@ def main():
         raise RuntimeError(
             "SSM did not become ready. Check EC2 bootstrap logs; infrastructure remains provisioned."
         )
+    # EC2 does not rerun first-boot user data on ordinary stack updates. Apply the
+    # installed template's bootstrap through SSM too, so updates and recovery use
+    # the same startup script and can recover from a failed initial package install.
+    user_data = ec2.describe_instance_attribute(
+        InstanceId=instance, Attribute="userData"
+    )["UserData"]["Value"]
+    base64.b64decode(user_data, validate=True)
     command = ssm.send_command(
         InstanceIds=[instance],
         DocumentName="AWS-RunShellScript",
         Parameters={
             "commands": [
                 "set -eu",
-                "for i in $(seq 1 30); do test -x /opt/truckmate/start.sh && break; sleep 2; done",
+                "install -d -m 700 /opt/truckmate",
+                f"printf '%s' '{user_data}' | base64 --decode > /opt/truckmate/bootstrap.sh",
+                "chmod 700 /opt/truckmate/bootstrap.sh",
+                "bash /opt/truckmate/bootstrap.sh",
                 "test -x /opt/truckmate/start.sh",
                 f"printf '%s\\n' '{args.image}' > /opt/truckmate/image-uri",
                 "systemctl restart truckmate",
                 "for i in $(seq 1 30); do curl --fail --silent http://localhost/api/health && exit 0; sleep 2; done; exit 1",
             ],
-            "executionTimeout": ["180"],
+            "executionTimeout": ["600"],
         },
     )["Command"]["CommandId"]
     ssm.get_waiter("command_executed").wait(
         CommandId=command,
         InstanceId=instance,
-        WaiterConfig={"Delay": 5, "MaxAttempts": 45},
+        WaiterConfig={"Delay": 5, "MaxAttempts": 125},
     )
     for attempt in range(8):
         try:
