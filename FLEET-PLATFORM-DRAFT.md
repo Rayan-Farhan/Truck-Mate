@@ -1,12 +1,12 @@
 # TruckMate fleet platform implementation plan
 
-Build two signed-in workspaces in the existing React and Django app. Fleet admins assign and monitor deliveries. Drivers open assigned jobs in the weather-aware planner, search routes independently, and report progress.
+TruckMate operates one company fleet. The two signed-in workspaces share its Django backend. Admins assign and monitor deliveries. Drivers open assigned jobs in the weather-aware planner, search routes independently, and report progress.
 
 ## 1. Add fleet data and accounts in Django
 
 - Add a `backend/fleet/` app with company, membership, job, and job update models. Use Django users and give each membership an admin or driver role.
 - Configure PostgreSQL and add migrations. Store pickup and delivery locations, planned departure, cargo weight, delivery deadline, and driver assignment. Keep timestamped records of status changes, ETAs, and delay reasons.
-- Enable Django sessions and CSRF protection. Add login, logout, current user, and invite and password reset flows. Add a management command to create the first company and admin. Let admins invite and deactivate their own drivers.
+- Enable Django sessions and CSRF protection. Provide separate admin and driver sign-in pages, with password recovery. Provision the first TruckMate admin privately. Admins can invite other admins and drivers and deactivate drivers.
 - Scope fleet API reads and writes to the signed-in user’s company and role. Drivers can update jobs assigned to them. Admins can create, edit, assign, reassign, and cancel jobs within their company.
 
 ## 2. Connect the driver workspace to the planner
@@ -16,6 +16,8 @@ Build two signed-in workspaces in the existing React and Django app. Fleet admin
 - Let drivers mark a job en route or delivered and report a delay with a revised ETA and reason. Save the job change and its history together.
 
 ## 3. Build the fleet admin workspace
+
+- Use separate Dashboard, Assign a Job, Trucks, and Drivers tabs. Pair the assignment form with a pickup and delivery map. Keep vehicle and driver management in their own views.
 
 - Show a driver roster and a job board with assignment, progress, deadline, latest ETA, and last check-in. Let admins manage drivers and job assignments from this workspace.
 - Flag a job as at risk when its current ETA exceeds the deadline and overdue when the deadline has passed without delivery. Show missing or stale ETAs explicitly. Refresh the board periodically so driver updates appear without a page reload.

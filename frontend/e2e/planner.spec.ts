@@ -2,9 +2,19 @@ import { test, expect } from '@playwright/test';
 
 // Controlled form regressions; live provider acceptance is in live.spec.ts.
 test.beforeEach(async ({ page }) => {
-  await page.route('**/api/config', (route) => route.fulfill({
-    json: { live_routing: true, bedrock: false, groq: false },
-  }));
+  await page.route('**/api/fleet/session', (route) =>
+    route.fulfill({
+      json: {
+        user: { id: 1, role: 'driver', username: 'driver@example.com', company: 'TruckMate' },
+        email_enabled: false,
+      },
+    }),
+  );
+  await page.route('**/api/config', (route) =>
+    route.fulfill({
+      json: { live_routing: true, bedrock: false, groq: false },
+    }),
+  );
 });
 
 test('opens a live planner without demo controls or automatic analysis', async ({ page }) => {
@@ -12,7 +22,7 @@ test('opens a live planner without demo controls or automatic analysis', async (
   page.on('request', (r) => {
     if (r.url().endsWith('/api/analyses')) analyses++;
   });
-  await page.goto('/');
+  await page.goto('/fleet/planner');
   await expect(page.getByRole('button', { name: 'Find routes', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Demo', exact: true })).toHaveCount(0);
   await expect(page.getByLabel('Scenario')).toHaveCount(0);
@@ -21,7 +31,7 @@ test('opens a live planner without demo controls or automatic analysis', async (
 });
 
 test('methodology closes with Escape and preserves inputs', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/fleet/planner');
   await page.getByLabel('PAYLOAD WEIGHT', { exact: true }).fill('70990');
   await page.getByRole('button', { name: 'How it works' }).click();
   await expect(page.getByRole('dialog')).toContainText('The assessment thresholds');
@@ -39,7 +49,7 @@ test('empty suggestions and unselected text cannot submit an invalid trip', asyn
     requests++;
     return route.abort();
   });
-  await page.goto('/');
+  await page.goto('/fleet/planner');
   const origin = page.getByRole('combobox', { name: 'FROM', exact: true });
   await origin.fill('Seattle');
   await expect(page.getByText('No matching places. Try a city and state.')).toBeVisible();
@@ -61,7 +71,7 @@ test('payload validation and swap preserve live request values', async ({ page }
       json: { error: { code: 'TEST_ERROR', message: 'Controlled provider error' } },
     });
   });
-  await page.goto('/');
+  await page.goto('/fleet/planner');
   await page.getByRole('button', { name: 'Swap origin and destination' }).click();
   await expect(page.getByRole('combobox', { name: 'FROM', exact: true })).toHaveValue('Denver, CO');
   const input = page.getByLabel('PAYLOAD WEIGHT', { exact: true });
@@ -102,7 +112,7 @@ test('location provider failure has a working retry button', async ({ page }) =>
           })
         : route.fulfill({ json: { results: [{ label: 'Seattle, WA', lat: 47.6, lon: -122.3 }] } }),
   );
-  await page.goto('/');
+  await page.goto('/fleet/planner');
   await page.getByRole('combobox', { name: 'FROM', exact: true }).fill('Seattle');
   await expect(page.getByRole('alert')).toContainText('TomTom location search');
   await page.getByRole('button', { name: 'Retry location search', exact: true }).click();

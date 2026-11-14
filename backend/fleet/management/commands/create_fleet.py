@@ -14,15 +14,13 @@ class Command(BaseCommand):
     help = "Create a company and its first fleet administrator."
 
     def add_arguments(self, parser):
-        parser.add_argument("company")
         parser.add_argument("email")
 
     def handle(self, *args, **options):
         email = options["email"].strip().lower()
-        name = options["company"].strip()
         User = get_user_model()
-        if not name or len(name) > 150 or len(email) > 150:
-            raise CommandError("Provide a valid company name and email.")
+        if len(email) > 150:
+            raise CommandError("Provide a valid email.")
         if User.objects.filter(username=email).exists():
             raise CommandError("An account already uses this email.")
         user = User(username=email, email=email)
@@ -37,7 +35,7 @@ class Command(BaseCommand):
         with transaction.atomic():
             user.set_password(password)
             user.save()
-            company = Company.objects.create(name=name)
+            company, _ = Company.objects.get_or_create(name="TruckMate")
             Membership.objects.create(
                 user=user, company=company, role=Membership.Role.ADMIN
             )

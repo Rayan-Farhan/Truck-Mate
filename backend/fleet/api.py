@@ -30,7 +30,7 @@ from rest_framework.throttling import AnonRateThrottle
 
 from routing.api import PlaceSerializer
 
-from .models import Company, Job, JobUpdate, Membership, Truck
+from .models import Job, JobUpdate, Membership, Truck
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ def member_for(user):
     if user.is_authenticated:
         return (
             Membership.objects.select_related("company")
-            .filter(user=user, active=True)
+            .filter(user=user, active=True, company__name="TruckMate")
             .first()
         )
     return None
@@ -53,6 +53,7 @@ def identity(member):
     return {
         "id": member.pk,
         "username": member.user.username,
+        "name": member.user.get_full_name() or member.user.username,
         "role": member.role,
         "company": member.company.name,
     }
@@ -108,7 +109,7 @@ def sign_in(request):
         password=data.get("password", ""),
     )
     member = member_for(user) if user else None
-    if member is None:
+    if member is None or data.get("portal", member.role) != member.role:
         return error("Invalid credentials or inactive account.", 401)
     login(request, user)
     return JsonResponse({"user": identity(member)})
@@ -122,48 +123,13 @@ def sign_out(request):
     return JsonResponse({"user": None})
 
 
-class CompanyRegistration(serializers.Serializer):
-    company = serializers.CharField(max_length=150)
-    email = serializers.EmailField(max_length=150)
-    password = serializers.CharField(
-        max_length=128, trim_whitespace=False, write_only=True
-    )
-
-
-@never_cache
-@require_POST
-@csrf_protect
-def register(request):
-    if not AccountThrottle().allow_request(request, None):
-        return error("Too many account requests. Try again shortly.", 429)
-    form = CompanyRegistration(data=credentials(request))
-    if not form.is_valid():
-        return error(" ".join(str(messages[0]) for messages in form.errors.values()))
-    data = form.validated_data
-    email = data["email"].lower()
-    user = User(username=email, email=email)
-    try:
-        validate_password(data["password"], user)
-    except ValidationError as exc:
-        return error(" ".join(exc.messages))
-    try:
-        with transaction.atomic():
-            user.set_password(data["password"])
-            user.save()
-            company = Company.objects.create(name=data["company"])
-            Membership.objects.create(
-                user=user, company=company, role=Membership.Role.ADMIN
-            )
-    except IntegrityError:
-        return error(
-            "An account already uses that email. Sign in or reset your password.", 409
-        )
-    return JsonResponse({"ok": True}, status=201)
-
-
 def account_link(user):
     query = urlencode(
-        {"user": user.pk, "token": default_token_generator.make_token(user)}
+        {
+            "user": user.pk,
+            "token": default_token_generator.make_token(user),
+            "portal": user.membership.role,
+        }
     )
     return f"/fleet/reset#{query}"
 
@@ -189,7 +155,11 @@ def request_password(request):
         return error("Too many account requests. Try again shortly.", 429)
     username = credentials(request).get("username", "").strip().lower()
     user = User.objects.filter(
-        username=username, email__gt="", is_active=True, membership__active=True
+        username=username,
+        email__gt="",
+        is_active=True,
+        membership__active=True,
+        membership__company__name="TruckMate",
     ).first()
     if user:
         try:
@@ -216,6 +186,7 @@ def reset_password(request):
             pk=int(identifier),
             is_active=True,
             membership__active=True,
+            membership__company__name="TruckMate",
         )
         .first()
     )
@@ -263,11 +234,9 @@ class DriverSerializer(serializers.Serializer):
 @api_view(["GET", "POST"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
-def drivers(request):
+def drivers(request, role=Membership.Role.DRIVER):
     member = require_member(request, Membership.Role.ADMIN)
-    roster = Membership.objects.filter(
-        company=member.company, role=Membership.Role.DRIVER
-    )
+    roster = Membership.objects.filter(company=member.company, role=role)
     if request.method == "GET":
         return Response(
             [
@@ -292,7 +261,7 @@ def drivers(request):
                 invited = Membership.objects.create(
                     user=user,
                     company=member.company,
-                    role=Membership.Role.DRIVER,
+                    role=role,
                 )
         except IntegrityError:
             raise serializers.ValidationError(

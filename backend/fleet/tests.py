@@ -34,22 +34,32 @@ class FleetWorkflowTests(TestCase):
         self.assertEqual(mail.outbox[0].to, [self.admin.user.email])
         self.assertIn("https://truckmate.example/fleet/reset#", mail.outbox[0].body)
 
-    def test_registration_creates_isolated_admin_and_allows_sign_in(self):
+    def test_private_admin_invites_and_role_specific_login(self):
+        self.assertEqual(self.request("POST", "register", {}).status_code, 404)
         email = "new-admin@example.com"
-        data = {
-            "company": "New Carrier",
-            "email": email,
-            "password": "A-strong-new-fleet#8",
+        invite = {"name": "New admin", "email": email}
+        self.client.force_login(self.driver.user)
+        self.assertEqual(self.request("POST", "admins", invite).status_code, 403)
+        self.client.force_login(self.admin.user)
+        self.assertEqual(self.request("POST", "admins", invite).status_code, 201)
+        self.assertEqual(Membership.objects.get(user__username=email).role, "admin")
+        self.client.logout()
+        credentials = {
+            "username": self.admin.user.email,
+            "password": "A-strong-test-password#1",
         }
-        response = self.request("POST", "register", data)
-        self.assertEqual(response.status_code, 201, response.content)
-        self.assertEqual(self.request("POST", "register", data).status_code, 409)
-        response = self.request(
-            "POST", "login", {"username": email, "password": data["password"]}
+        self.assertEqual(
+            self.request(
+                "POST", "login", {**credentials, "portal": "driver"}
+            ).status_code,
+            401,
         )
-        self.assertEqual(response.json()["user"]["role"], "admin")
-        self.assertEqual(response.json()["user"]["company"], "New Carrier")
-        self.assertEqual(self.request("GET", "drivers").json(), [])
+        self.assertEqual(
+            self.request(
+                "POST", "login", {**credentials, "portal": "admin"}
+            ).status_code,
+            200,
+        )
 
     def test_truck_assignments_enforce_capacity_and_company(self):
         self.client.force_login(self.admin.user)
@@ -74,14 +84,14 @@ class FleetWorkflowTests(TestCase):
         )
         self.assertEqual(self.request("DELETE", f"trucks/{pk}").status_code, 400)
         self.client.force_login(self.outside.user)
-        self.assertEqual(self.request("GET", "trucks").json(), [])
+        self.assertEqual(self.request("GET", "trucks").status_code, 403)
         self.assertEqual(
-            self.request("PATCH", f"trucks/{pk}", {"available": False}).status_code, 404
+            self.request("PATCH", f"trucks/{pk}", {"available": False}).status_code, 403
         )
 
     def setUp(self):
         cache.clear()
-        self.company = Company.objects.create(name="TruckMate Test Fleet")
+        self.company = Company.objects.create(name="TruckMate")
         self.admin = self.member(self.company, "admin", "admin@example.com")
         self.driver = self.member(self.company, "driver", "driver@example.com")
         self.other_driver = self.member(
@@ -188,7 +198,9 @@ class FleetWorkflowTests(TestCase):
 
     def test_permissions_and_reassignment(self):
         pk = self.create_job()
-        for user in (self.other_driver.user, self.outside.user):
+        self.client.force_login(self.outside.user)
+        self.assertEqual(self.request("GET", "jobs").status_code, 403)
+        for user in (self.other_driver.user,):
             self.client.force_login(user)
             self.assertEqual(self.request("GET", "jobs").json(), [])
             self.assertEqual(self.request("GET", f"jobs/{pk}").status_code, 404)

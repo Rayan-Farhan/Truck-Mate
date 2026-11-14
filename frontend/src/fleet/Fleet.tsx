@@ -1,14 +1,17 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { lazy, Suspense, useState, type FormEvent, type ReactNode } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import App from '../App';
 import { request } from '../api';
 import { PlaceInput } from '../components/PlaceInput';
 import type { Place } from '../types';
 import './fleet.css';
 
+const DispatchMap = lazy(() => import('./DispatchMap').then(({ DispatchMap }) => ({ default: DispatchMap })));
+
 interface User {
   id: number;
   username: string;
+  name: string;
   role: 'admin' | 'driver';
   company: string;
 }
@@ -93,7 +96,7 @@ function Layout({ user, children }: { user?: User; children: ReactNode }) {
   return (
     <div className="fleet-shell">
       <header className="fleet-header">
-        <a className="brand" href="/fleet">
+        <a className="brand" href={user?.role === 'admin' ? '/fleet/admin' : '/fleet'}>
           <span className="brand-mark" aria-hidden="true">
             <svg viewBox="0 0 40 40">
               <path d="M7 12h16v15H7zM23 18h6l5 6v3H23M23 24h11" />
@@ -105,23 +108,42 @@ function Layout({ user, children }: { user?: User; children: ReactNode }) {
             TruckMate<span className="brand-period">.</span>
           </span>
         </a>
-        <nav aria-label="Fleet navigation">
-          <a href="/">Route planner</a>
-          {user && (
+        {user && (
+          <nav aria-label="Fleet navigation">
             <button
               disabled={action.busy}
               onClick={() =>
                 void action.run(async () => {
                   await fleet('logout', {});
-                  location.replace('/fleet');
+                  location.replace(user?.role === 'admin' ? '/fleet/admin' : '/fleet');
                 })
               }
             >
               Sign out
             </button>
-          )}
-        </nav>
+          </nav>
+        )}
       </header>
+      {user && (
+        <nav className="fleet-tabs" aria-label={user.role === 'admin' ? 'Admin portal' : 'Driver portal'}>
+          {(user.role === 'admin'
+            ? [
+                ['/fleet/admin', 'Dashboard'],
+                ['/fleet/admin/assign', 'Assign a Job'],
+                ['/fleet/admin/trucks', 'Trucks'],
+                ['/fleet/admin/drivers', 'Drivers'],
+              ]
+            : [
+                ['/fleet', 'Dashboard'],
+                ['/fleet/planner', 'Route Planner'],
+              ]
+          ).map(([href, label]) => (
+            <a key={href} href={href} aria-current={location.pathname === href ? 'page' : undefined}>
+              {label}
+            </a>
+          ))}
+        </nav>
+      )}
       <main className="fleet-main">
         {action.message && <p role="alert">{action.message}</p>}
         {children}
@@ -132,28 +154,25 @@ function Layout({ user, children }: { user?: User; children: ReactNode }) {
 
 function Account({ page, emailEnabled }: { page: string; emailEnabled: boolean }) {
   const reset = page === '/fleet/reset';
-  const recovery = page === '/fleet/recover';
-  const register = page === '/fleet/register';
+  const recovery = page.endsWith('/recover');
+  const admin = page.startsWith('/fleet/admin');
+  const home = admin ? '/fleet/admin' : '/fleet';
   const [sent, setSent] = useState(false);
   const action = useAction();
   const params = new URLSearchParams(location.hash.slice(1));
-  const client = useQueryClient();
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
     void action.run(async () => {
       if (reset) {
         await fleet('password/reset', { ...data, user: params.get('user'), token: params.get('token') });
-        location.replace('/fleet');
-      } else if (register) {
-        await fleet('register', { ...data, email: data.username });
-        location.replace('/fleet?registered=1');
+        location.replace(params.get('portal') === 'admin' ? '/fleet/admin' : '/fleet');
       } else if (recovery) {
         await fleet('password/request', data);
         setSent(true);
       } else {
-        const result = await fleet<{ user: User }>('login', data);
-        client.setQueryData(['fleet-session'], { ...result, email_enabled: emailEnabled });
+        await fleet('login', { ...data, portal: admin ? 'admin' : 'driver' });
+        location.reload();
       }
     });
   }
@@ -161,32 +180,23 @@ function Account({ page, emailEnabled }: { page: string; emailEnabled: boolean }
     <Layout>
       <section className="fleet-panel fleet-account">
         <h1>
-          {register
-            ? 'Register your fleet'
-            : reset
-              ? 'Set your password'
-              : recovery
-                ? 'Reset your password'
-                : 'Fleet sign-in'}
+          {reset
+            ? 'Set your password'
+            : recovery
+              ? 'Reset your password'
+              : admin
+                ? 'Admin sign-in'
+                : 'Driver sign-in'}
         </h1>
-        {page === '/fleet' && new URLSearchParams(location.search).has('registered') && (
-          <p role="status">Your fleet is ready. Sign in with your new account.</p>
-        )}
         {sent ? (
           <p role="status">If the account exists, we’ll send a password reset link.</p>
         ) : recovery && !emailEnabled ? (
-          <p>Email recovery is unavailable. Contact your fleet administrator or support for a reset link.</p>
+          <p>Email recovery is unavailable. Contact TruckMate for help resetting your password.</p>
         ) : (
           <form className="fleet-form" onSubmit={submit}>
-            {register && (
-              <label>
-                Company name
-                <input name="company" autoComplete="organization" required maxLength={150} />
-              </label>
-            )}
             {!reset && (
               <label>
-                Email
+                TruckMate email
                 <input name="username" type="email" autoComplete="username" required />
               </label>
             )}
@@ -197,29 +207,20 @@ function Account({ page, emailEnabled }: { page: string; emailEnabled: boolean }
                   name="password"
                   type="password"
                   required
-                  autoComplete={reset || register ? 'new-password' : 'current-password'}
+                  autoComplete={reset ? 'new-password' : 'current-password'}
                 />
               </label>
             )}
             <button className="fleet-primary" disabled={action.busy}>
-              {register
-                ? 'Create fleet account'
-                : reset
-                  ? 'Save password'
-                  : recovery
-                    ? 'Send reset link'
-                    : 'Sign in'}
+              {reset ? 'Save password' : recovery ? 'Send reset link' : 'Sign in'}
             </button>
           </form>
         )}
         {action.message && <p role="alert">{action.message}</p>}
-        {reset || recovery || register ? (
-          <a href="/fleet">Back to sign-in</a>
+        {reset || recovery ? (
+          <a href={params.get('portal') === 'admin' ? '/fleet/admin' : home}>Back to sign-in</a>
         ) : (
-          <nav className="fleet-actions" aria-label="Account options">
-            <a href="/fleet/recover">Forgot your password?</a>
-            <a href="/fleet/register">Register a fleet</a>
-          </nav>
+          <a href={home + '/recover'}>Forgot your password?</a>
         )}
       </section>
     </Layout>
@@ -231,11 +232,13 @@ function JobForm({
   trucks,
   job,
   saved,
+  showMap,
 }: {
   drivers: Driver[];
   trucks: Truck[];
   job?: Job;
   saved: () => void;
+  showMap?: boolean;
 }) {
   const action = useAction();
   const [origin, setOrigin] = useState(job?.origin);
@@ -247,7 +250,7 @@ function JobForm({
     const values = new FormData(form);
     void action.run(async () => {
       if (!Number.isFinite(origin?.lat) || !Number.isFinite(destination?.lat)) {
-        throw new Error('Choose pickup and delivery from the search suggestions.');
+        throw new Error('Choose pickup and delivery on the map or from search suggestions.');
       }
       await fleet(
         job ? `jobs/${job.id}` : 'jobs',
@@ -274,85 +277,143 @@ function JobForm({
     });
   }
   return (
-    <form className="fleet-form" onSubmit={submit}>
-      <PlaceInput label="Pickup" value={origin ?? blank} onChange={setOrigin} />
-      <PlaceInput label="Delivery" value={destination ?? blank} onChange={setDestination} />
-      <div className="fleet-fields">
+    <div className={showMap ? 'fleet-grid fleet-dispatch' : undefined}>
+      <form className="fleet-form" onSubmit={submit}>
+        <PlaceInput label="Pickup" value={origin ?? blank} onChange={setOrigin} />
+        <PlaceInput label="Delivery" value={destination ?? blank} onChange={setDestination} />
+        <div className="fleet-fields">
+          <label>
+            Driver
+            <select name="driver" aria-label="Driver" required defaultValue={job?.driver_id ?? ''}>
+              <option value="">Select a driver</option>
+              {drivers
+                .filter((driver) => driver.active)
+                .map((driver) => (
+                  <option key={driver.id} value={driver.id}>
+                    {driver.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label>
+            Truck
+            <select name="truck" aria-label="Truck" defaultValue={job?.truck_id ?? ''}>
+              <option value="">Unassigned</option>
+              {trucks
+                .filter((truck) => truck.available || truck.id === job?.truck_id)
+                .map((truck) => (
+                  <option key={truck.id} value={truck.id}>
+                    {truck.registration} · {truck.capacity_lb.toLocaleString()} lb
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label>
+            Cargo weight (lb)
+            <input
+              name="load"
+              type="number"
+              required
+              min={0}
+              max={80000}
+              defaultValue={job?.load_weight_lb ?? 0}
+            />
+          </label>
+          <label>
+            Departure (local time)
+            <input
+              name="departure"
+              type="datetime-local"
+              required
+              defaultValue={job ? localInput(job.departure) : localInput(Date.now() + 3600000)}
+            />
+          </label>
+          <label>
+            Delivery deadline (local time)
+            <input
+              name="deadline"
+              type="datetime-local"
+              required
+              defaultValue={job ? localInput(job.deadline) : undefined}
+            />
+          </label>
+        </div>
+        <div className="fleet-fields">
+          <label>
+            Cargo type
+            <input name="cargo_type" maxLength={100} defaultValue={job?.cargo_type} />
+          </label>
+          <label>
+            Customer
+            <input name="customer_name" maxLength={150} defaultValue={job?.customer_name} />
+          </label>
+        </div>
         <label>
-          Driver
-          <select name="driver" aria-label="Driver" required defaultValue={job?.driver_id ?? ''}>
-            <option value="">Select a driver</option>
-            {drivers
-              .filter((driver) => driver.active)
-              .map((driver) => (
-                <option key={driver.id} value={driver.id}>
-                  {driver.name}
-                </option>
-              ))}
-          </select>
+          Dispatch instructions
+          <textarea name="instructions" maxLength={1000} rows={3} defaultValue={job?.instructions} />
         </label>
-        <label>
-          Truck
-          <select name="truck" aria-label="Truck" defaultValue={job?.truck_id ?? ''}>
-            <option value="">Unassigned</option>
-            {trucks
-              .filter((truck) => truck.available || truck.id === job?.truck_id)
-              .map((truck) => (
-                <option key={truck.id} value={truck.id}>
-                  {truck.registration} · {truck.capacity_lb.toLocaleString()} lb
-                </option>
-              ))}
-          </select>
-        </label>
-        <label>
-          Cargo weight (lb)
-          <input
-            name="load"
-            type="number"
-            required
-            min={0}
-            max={80000}
-            defaultValue={job?.load_weight_lb ?? 0}
+        <button className="fleet-primary" disabled={action.busy}>
+          {job ? 'Save assignment' : 'Assign job'}
+        </button>
+        {action.message && <p role="alert">{action.message}</p>}
+      </form>
+      {showMap && (
+        <Suspense fallback={<p role="status">Loading dispatch map…</p>}>
+          <DispatchMap
+            origin={origin}
+            destination={destination}
+            onOrigin={setOrigin}
+            onDestination={setDestination}
           />
+        </Suspense>
+      )}
+    </div>
+  );
+}
+
+function AdminInvites() {
+  const action = useAction();
+  const [result, setResult] = useState('');
+  return (
+    <section className="fleet-panel">
+      <h2>Invite an administrator</h2>
+      <form
+        className="fleet-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          const data = Object.fromEntries(new FormData(form));
+          setResult('');
+          void action.run(async () => {
+            const invite = await fleet<{ setup_url?: string }>('admins', data);
+            setResult(invite.setup_url ? new URL(invite.setup_url, location.origin).href : '');
+            form.reset();
+            if (!invite.setup_url) setResult('Invitation sent.');
+          });
+        }}
+      >
+        <label>
+          Name
+          <input name="name" required maxLength={150} />
         </label>
         <label>
-          Departure (local time)
-          <input
-            name="departure"
-            type="datetime-local"
-            required
-            defaultValue={job ? localInput(job.departure) : localInput(Date.now() + 3600000)}
-          />
+          Email
+          <input name="email" type="email" required maxLength={150} />
         </label>
+        <button className="fleet-primary" disabled={action.busy}>
+          Invite admin
+        </button>
+      </form>
+      {result.startsWith('http') ? (
         <label>
-          Delivery deadline (local time)
-          <input
-            name="deadline"
-            type="datetime-local"
-            required
-            defaultValue={job ? localInput(job.deadline) : undefined}
-          />
+          Private setup link
+          <input readOnly value={result} onFocus={(event) => event.target.select()} />
         </label>
-      </div>
-      <div className="fleet-fields">
-        <label>
-          Cargo type
-          <input name="cargo_type" maxLength={100} defaultValue={job?.cargo_type} />
-        </label>
-        <label>
-          Customer
-          <input name="customer_name" maxLength={150} defaultValue={job?.customer_name} />
-        </label>
-      </div>
-      <label>
-        Dispatch instructions
-        <textarea name="instructions" maxLength={1000} rows={3} defaultValue={job?.instructions} />
-      </label>
-      <button className="fleet-primary" disabled={action.busy}>
-        {job ? 'Save assignment' : 'Assign job'}
-      </button>
+      ) : (
+        result && <p role="status">{result}</p>
+      )}
       {action.message && <p role="alert">{action.message}</p>}
-    </form>
+    </section>
   );
 }
 
@@ -440,7 +501,7 @@ function Roster({ drivers, jobs, refresh }: { drivers: Driver[]; jobs: Job[]; re
         </div>
       )}
       {action.message && <p role="alert">{action.message}</p>}
-      <ul className="fleet-list">
+      <ul className="fleet-list fleet-roster">
         {drivers.map((driver) => {
           const active = jobs.filter((job) => job.driver_id === driver.id && !closed(job));
           return (
@@ -524,7 +585,7 @@ function JobBoard({ jobs, admin }: { jobs: Job[]; admin: boolean }) {
                 .map((job) => (
                   <tr key={job.id}>
                     <th scope="row">
-                      <a href={`/fleet/jobs/${job.id}`}>{title(job)}</a>
+                      <a href={`/fleet${admin ? '/admin' : ''}/jobs/${job.id}`}>{title(job)}</a>
                     </th>
                     {admin && <td data-label="Driver">{job.driver_name}</td>}
                     <td data-label="Progress" className="fleet-state">
@@ -613,7 +674,7 @@ function TruckRoster({ trucks, refresh }: { trucks: Truck[]; refresh: () => void
         </div>
       </form>
       {action.message && <p role="alert">{action.message}</p>}
-      <ul className="fleet-list">
+      <ul className="fleet-list fleet-roster">
         {trucks.map((truck) => (
           <li key={truck.id}>
             <div>
@@ -658,6 +719,7 @@ function useTrucks(user: User) {
 
 function Dashboard({ user }: { user: User }) {
   const admin = user.role === 'admin';
+  const tab = admin ? (location.pathname.split('/').filter(Boolean)[2] ?? 'dashboard') : 'dashboard';
   const trucks = useTrucks(user);
   const jobs = useQuery({
     queryKey: ['fleet-jobs', user.id],
@@ -671,8 +733,11 @@ function Dashboard({ user }: { user: User }) {
   });
   return (
     <Layout user={user}>
-      <h1>{admin ? user.company : 'Driver workspace'}</h1>
-      {admin && jobs.data && drivers.data && trucks.data && (
+      <h1>
+        {{ assign: 'Assign a Job', trucks: 'Trucks', drivers: 'Drivers' }[tab] ??
+          (admin ? 'TruckMate dashboard' : 'Driver dashboard')}
+      </h1>
+      {tab === 'dashboard' && admin && jobs.data && drivers.data && trucks.data && (
         <dl className="fleet-overview" aria-label="Fleet overview">
           <div>
             <dt>Trucks</dt>
@@ -693,19 +758,27 @@ function Dashboard({ user }: { user: User }) {
         </dl>
       )}
       {(jobs.isError || (admin && drivers.isError)) && <p role="alert">Unable to load fleet data.</p>}
-      {jobs.isPending && <p role="status">Loading jobs…</p>}
-      {jobs.data && <JobBoard jobs={jobs.data} admin={admin} />}
-      {admin && drivers.data && (
-        <div className="fleet-grid">
-          <section className="fleet-panel">
-            <h2>Assign a job</h2>
-            <JobForm drivers={drivers.data} trucks={trucks.data ?? []} saved={() => void jobs.refetch()} />
-          </section>
-          <Roster drivers={drivers.data} jobs={jobs.data ?? []} refresh={() => void drivers.refetch()} />
-        </div>
+      {!admin && (
+        <section className="fleet-panel">
+          <h2>{user.name || user.username}</h2>
+          <p>{user.username}</p>
+        </section>
       )}
+      {tab === 'dashboard' && jobs.isPending && <p role="status">Loading jobs…</p>}
+      {tab === 'dashboard' && jobs.data && <JobBoard jobs={jobs.data} admin={admin} />}
+      {tab === 'assign' && drivers.data && trucks.data && (
+        <section className="fleet-panel">
+          <JobForm drivers={drivers.data} trucks={trucks.data} saved={() => void jobs.refetch()} showMap />
+        </section>
+      )}
+      {tab === 'drivers' && drivers.data && (
+        <Roster drivers={drivers.data} jobs={jobs.data ?? []} refresh={() => void drivers.refetch()} />
+      )}
+      {tab === 'drivers' && <AdminInvites />}
       {admin && trucks.isError && <p role="alert">Unable to load trucks.</p>}
-      {admin && trucks.data && <TruckRoster trucks={trucks.data} refresh={() => void trucks.refetch()} />}
+      {tab === 'trucks' && trucks.data && (
+        <TruckRoster trucks={trucks.data} refresh={() => void trucks.refetch()} />
+      )}
     </Layout>
   );
 }
@@ -853,7 +926,7 @@ function JobPage({ user, id, planning }: { user: User; id: string; planning: boo
   }
   return (
     <Layout user={user}>
-      <a href="/fleet">Back to {admin ? 'fleet' : 'my jobs'}</a>
+      <a href={admin ? '/fleet/admin' : '/fleet'}>Back to {admin ? 'fleet' : 'my jobs'}</a>
       <h1>{title(job)}</h1>
       <section className="fleet-panel">
         <dl className="fleet-details">
@@ -969,10 +1042,9 @@ export default function Fleet() {
   });
   const user = session.data?.user;
   const path = location.pathname.replace(/\/$/, '');
-  const accountPage = ['/fleet/reset', '/fleet/recover', '/fleet/register'].includes(path);
-  useEffect(() => {
-    if (!user && session.isSuccess && !accountPage && path !== '/fleet') location.replace('/fleet');
-  }, [user, session.isSuccess, accountPage, path]);
+  const accountPage = ['/fleet/reset', '/fleet/recover', '/fleet/admin/recover'].includes(path);
+  const adminPortal = path.startsWith('/fleet/admin');
+  const authorized = user && user.role === (adminPortal ? 'admin' : 'driver');
   if (session.isPending)
     return (
       <Layout>
@@ -985,8 +1057,9 @@ export default function Fleet() {
         <p role="alert">Unable to load your session.</p>
       </Layout>
     );
-  if (!user || accountPage)
+  if (!authorized || accountPage)
     return <Account page={path} emailEnabled={Boolean(session.data?.email_enabled)} />;
-  const job = path.match(/^\/fleet\/jobs\/(\d+)(\/plan)?$/);
+  if (path === '/fleet/planner') return <App fleetLink="/fleet" fleetLinkLabel="Dashboard" />;
+  const job = path.match(/^\/fleet(?:\/admin)?\/jobs\/(\d+)(\/plan)?$/);
   return job ? <JobPage user={user} id={job[1]} planning={Boolean(job[2])} /> : <Dashboard user={user} />;
 }
