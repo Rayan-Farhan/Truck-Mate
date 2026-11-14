@@ -5,6 +5,7 @@ import { request } from '../api';
 import { PlaceInput } from '../components/PlaceInput';
 import type { Place } from '../types';
 import './fleet.css';
+import { Inbox, JobOperations, Reports, VehicleRecords } from './Operations';
 
 const DispatchMap = lazy(() => import('./DispatchMap').then(({ DispatchMap }) => ({ default: DispatchMap })));
 
@@ -146,6 +147,7 @@ function Layout({ user, children }: { user?: User; children: ReactNode }) {
       )}
       <main className="fleet-main">
         {action.message && <p role="alert">{action.message}</p>}
+        {user && <Inbox admin={user.role === 'admin'} />}
         {children}
       </main>
     </div>
@@ -702,6 +704,7 @@ function TruckRoster({ trucks, refresh }: { trucks: Truck[]; refresh: () => void
                 Remove
               </button>
             </div>
+            <VehicleRecords id={truck.id} />
           </li>
         ))}
       </ul>
@@ -766,6 +769,7 @@ function Dashboard({ user }: { user: User }) {
       )}
       {tab === 'dashboard' && jobs.isPending && <p role="status">Loading jobs…</p>}
       {tab === 'dashboard' && jobs.data && <JobBoard jobs={jobs.data} admin={admin} />}
+      {tab === 'dashboard' && admin && <Reports />}
       {tab === 'assign' && drivers.data && trucks.data && (
         <section className="fleet-panel">
           <JobForm drivers={drivers.data} trucks={trucks.data} saved={() => void jobs.refetch()} showMap />
@@ -1001,6 +1005,7 @@ function JobPage({ user, id, planning }: { user: User; id: string; planning: boo
         </dl>
       </section>
       <Progress job={job} admin={admin} refresh={() => void detail.refetch()} />
+      <JobOperations id={id} status={job.status} admin={admin} />
       {admin && !closed(job) && drivers.data && (
         <section className="fleet-panel">
           <h2>Edit assignment</h2>

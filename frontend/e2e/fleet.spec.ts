@@ -26,6 +26,9 @@ test('account pages share the planner palette and expose email recovery', async 
 test('admin management views are separated by tab', async ({ page }) => {
   await page.route('**/api/fleet/**', (route) => {
     const user = { id: 1, username: 'admin@example.com', role: 'admin', company: 'TruckMate' };
+    if (route.request().url().endsWith('/insights')) {
+      return route.fulfill({ json: { late_jobs: [], weather_jobs: [], due_records: [], suggestions: [] } });
+    }
     return route.fulfill({
       json: route.request().url().endsWith('/session') ? { user, email_enabled: false } : [],
     });

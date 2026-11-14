@@ -30,7 +30,7 @@ from rest_framework.throttling import AnonRateThrottle
 
 from routing.api import PlaceSerializer
 
-from .models import Job, JobUpdate, Membership, Truck
+from .models import Job, JobUpdate, Membership, Notification, TripLocation, Truck
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -556,6 +556,9 @@ def jobs(request):
     form.is_valid(raise_exception=True)
     item = Job.objects.create(company=member.company, **form.validated_data)
     record(item, member, "Job assigned")
+    Notification.objects.create(
+        recipient=item.driver, job=item, message="A delivery was assigned to you."
+    )
     return Response(job_data(item, detail=True), status=201)
 
 
@@ -583,10 +586,14 @@ def job(request, pk):
         item.route = item.eta = item.eta_updated_at = None
     if item.driver != data["driver"]:
         item.status = Job.Status.ASSIGNED
+        TripLocation.objects.filter(job=item).delete()
     for key, value in data.items():
         setattr(item, key, value)
     item.save()
     record(item, member, "Assignment updated")
+    Notification.objects.create(
+        recipient=item.driver, job=item, message="Your delivery assignment was updated."
+    )
     return Response(job_data(item, detail=True))
 
 
@@ -612,6 +619,12 @@ def confirm_route(item, data):
         key: route[key]
         for key in ("id", "label", "road", "distance_m", "duration_s", "worst_level")
     }
+    checkpoints = route.get("checkpoints", [])
+    stride = max(1, (len(checkpoints) + 23) // 24)
+    item.route["forecast_points"] = [
+        {"coordinates": point["coordinates"], "elapsed_s": point["elapsed_s"]}
+        for point in checkpoints[::stride]
+    ]
     item.eta = serializers.DateTimeField().to_internal_value(route["arrival_utc"])
     item.eta_updated_at = timezone.now()
 
@@ -622,6 +635,8 @@ def confirm_route(item, data):
 @permission_classes([IsAuthenticated])
 @transaction.atomic
 def update_job(request, pk):
+    from .operations import notify_admins
+
     member = require_member(request)
     item = get_object_or_404(scoped_jobs(member).select_for_update(of=("self",)), pk=pk)
     form = UpdateInput(data=request.data)
@@ -665,4 +680,20 @@ def update_job(request, pk):
         item.delivered_at = timezone.now()
     item.save()
     record(item, member, data.get("note", ""))
+    if status == Job.Status.CANCELLED:
+        Notification.objects.create(
+            recipient=item.driver, job=item, message="Your delivery was cancelled."
+        )
+    elif status == Job.Status.DELAYED:
+        notify_admins(item, "A driver reported a delay.")
+    elif "route_id" in data and (item.route or {}).get("worst_level") in (
+        "severe",
+        "no_travel",
+    ):
+        notify_admins(item, "The selected route has severe weather exposure.")
+        Notification.objects.create(
+            recipient=item.driver,
+            job=item,
+            message="The selected route has severe weather exposure.",
+        )
     return Response(job_data(item, detail=True))

@@ -75,3 +75,45 @@ class JobUpdate(models.Model):
     eta = models.DateTimeField(null=True)
     note = models.CharField(max_length=500, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class TripExpense(models.Model):
+    job = models.ForeignKey(Job, related_name="expenses", on_delete=models.CASCADE)
+    actor = models.ForeignKey(Membership, on_delete=models.PROTECT)
+    category = models.CharField(max_length=12)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    note = models.CharField(max_length=250, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class VehicleRecord(models.Model):
+    truck = models.ForeignKey(Truck, on_delete=models.CASCADE)
+    kind = models.CharField(max_length=16)
+    title = models.CharField(max_length=120)
+    due = models.DateField()
+    completed = models.DateField(null=True)
+
+
+class DeliveryProof(models.Model):
+    job = models.OneToOneField(Job, on_delete=models.CASCADE)
+    recipient = models.CharField(max_length=120)
+    signature = models.BinaryField()
+    photo = models.BinaryField(null=True)
+    submitted = models.DateTimeField(auto_now=True)
+    verified = models.DateTimeField(null=True)
+
+
+class TripLocation(models.Model):
+    job = models.OneToOneField(Job, on_delete=models.CASCADE)
+    driver = models.ForeignKey(Membership, on_delete=models.PROTECT)
+    latitude = models.DecimalField(max_digits=8, decimal_places=5)
+    longitude = models.DecimalField(max_digits=8, decimal_places=5)
+    recorded = models.DateTimeField(auto_now=True)
+
+
+class Notification(models.Model):
+    recipient = models.ForeignKey(Membership, on_delete=models.CASCADE)
+    job = models.ForeignKey(Job, on_delete=models.CASCADE)
+    message = models.CharField(max_length=160)
+    created = models.DateTimeField(auto_now_add=True)
+    read = models.BooleanField(default=False)
