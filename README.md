@@ -1,11 +1,14 @@
 # TruckMate
 
-TruckMate helps truck drivers compare routes using weather forecasts, payload weight and travel time. It matches conditions to estimated arrival times along each route, shows where hazardous exposure occurs and explains why one route is recommended.
+TruckMate is a single-company fleet workspace with weather-aware truck routing. Dispatchers assign deliveries, manage drivers and vehicles, and monitor schedule and weather risk. Drivers plan routes, report progress and submit delivery proof.
 
-**[Open TruckMate](https://d1fmez7o5mdp8o.cloudfront.net)** · Hosted on AWS · React + Django
+**[Driver portal](https://d1fmez7o5mdp8o.cloudfront.net/fleet)** · **[Admin portal](https://d1fmez7o5mdp8o.cloudfront.net/fleet/admin)** · Hosted on AWS · React + Django
 
 ## Features
 
+- **Dispatch and fleet management:** assign deliveries from an interactive map, manage trucks and drivers, and track maintenance and document due dates.
+- **Driver operations:** review assigned deliveries, share a location check-in, log trip expenses and submit delivery proof with a signature and optional photo.
+- **Operations reporting:** review delivery costs, export CSV reports, receive in-app alerts and review assignment suggestions.
 - **Truck route comparison:** search real locations and compare up to three distinct truck routes, with distance, travel time, arrival time and weather exposure for each option.
 - **Weather at arrival:** sample the journey every **10, 25 or 50 miles**, including both endpoints, and match wind, rain and snowfall to the truck's estimated arrival at each checkpoint.
 - **Payload-aware risk:** classify conditions from **Low** to **No Travel**, applying additional wind restrictions for heavier loads.
@@ -17,7 +20,7 @@ TruckMate helps truck drivers compare routes using weather forecasts, payload we
 
 ## Using the hosted app
 
-1. Select an origin and destination from the location suggestions.
+1. Sign in to the driver portal with your TruckMate account and open Route Planner. An assigned delivery can prefill the planner.
 2. Choose a departure date, time and timezone, enter the cargo weight and select checkpoint spacing.
 3. Plan the trip and compare the returned routes, exposure summaries and recommendation.
 4. Select a route to inspect checkpoint ETAs and weather, or explore its corridor with the forecast slider.
@@ -46,6 +49,7 @@ TruckMate runs in **Sydney (`ap-southeast-2`)**. The HTTPS site serves the front
 | ---------------------- | ---------------------------------------------------------------------------------- |
 | Amazon CloudFront      | Public HTTPS access to the application                                             |
 | Amazon EC2             | Runs the Docker container                                                          |
+| Amazon RDS             | Stores fleet accounts, deliveries and operational records in private PostgreSQL   |
 | Amazon CloudWatch Logs | Collects application, service and CloudFront access logs with seven-day retention  |
 | Amazon ECR             | Stores private application images with immutable version tags                      |
 | AWS Secrets Manager    | Holds server configuration and application secrets                                 |
@@ -142,16 +146,20 @@ Select **Generate briefing** after planning a trip to request an optional driver
 
 ### Fleet workspaces
 
-The existing planner is at `/`. Open `/fleet` to sign in as a dispatcher or driver. Before starting Django locally, migrate the database and create the first dispatcher from the project root:
+TruckMate serves one company. Open `/fleet/admin` for dispatch and `/fleet` for driver sign-in. Signed-in drivers can open the existing planner at `/fleet/planner`. Initialize the database and privately create the first admin from the project root:
 
 ```powershell
 .\.venv\Scripts\python.exe backend\manage.py migrate
-.\.venv\Scripts\python.exe backend\manage.py create_fleet "Example Fleet" admin@example.com
+.\.venv\Scripts\python.exe backend\manage.py create_fleet admin@example.com
 ```
 
-Direct development uses SQLite by default. Docker Compose uses PostgreSQL with a persistent volume. To create a dispatcher in Compose, run `docker compose exec web python backend/manage.py create_fleet "Example Fleet" admin@example.com`.
+Direct development uses SQLite. In Docker Compose, use `docker compose exec web python backend/manage.py create_fleet admin@example.com`. Admins can invite additional admins and drivers from the Drivers tab. Password recovery is available from each sign-in page when email is configured.
 
 Dispatchers can invite drivers, assign deliveries and review deadlines, check-ins and ETA risk. Drivers can open an assigned delivery in the existing planner, save a route and ETA, and report progress. When `FLEET_EMAIL_ENABLED=false`, the dispatcher can generate a one-time setup or reset link to share privately. Development email uses Django’s console backend by default. For hosted email, configure `FLEET_EMAIL_ENABLED=true`, a verified sender, SMTP credentials and `FLEET_PUBLIC_ORIGIN` in the application settings secret.
+
+Fleet operations use the in-app notification inbox. Each delivery has expense logging, opt-in location check-ins and proof of delivery with a signature and optional photo. Truck cards track maintenance and document due dates. The admin dashboard includes assignment suggestions, delivery costs with CSV export, and a fleet assistant for late jobs, weather, assignments and upcoming maintenance.
+
+Location sharing is a foreground check-in. The ETA estimate uses the latest point, the saved route duration and comparable trip history when available. On EC2, install the [weather service](deploy/truckmate-fleet-weather.service) and [timer](deploy/truckmate-fleet-weather.timer) under `/etc/systemd/system`, run `systemctl daemon-reload`, then enable the timer with `systemctl enable --now truckmate-fleet-weather.timer`. Locally, run `python backend/manage.py refresh_fleet_weather --loop`. Set `FLEET_VISION_MODEL_ID` to an authorized Bedrock model with image input to enable receipt extraction. Drivers review the extracted fields before logging the expense. The fleet assistant uses keyword matching locally and supports optional Bedrock question classification.
 
 For AWS hosting, use [the RDS template](deploy/fleet-rds.yml) to provision the private database. Set `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` and `DB_PASSWORD` in the existing application settings secret. Create a dedicated PostgreSQL login that owns the application schema and can run migrations. Set `DJANGO_CSRF_TRUSTED_ORIGINS` to the public HTTPS URL. The CloudFront origin request policy must forward `sessionid` and `csrftoken`, and fleet API responses must bypass caching. The container applies migrations before starting Gunicorn.
 

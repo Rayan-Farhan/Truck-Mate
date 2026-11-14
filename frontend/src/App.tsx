@@ -127,10 +127,11 @@ function MethodDialog({ onClose }: { onClose: () => void }) {
 interface PlannerProps {
   initialPlan?: Partial<PlanRequest>;
   fleetLink?: string;
+  fleetLinkLabel?: string;
   onConfirmRoute?: (analysis: Analysis, route: Analysis['routes'][number]) => void;
 }
 
-export default function App({ initialPlan, fleetLink, onConfirmRoute }: PlannerProps = {}) {
+export default function App({ initialPlan, fleetLink, fleetLinkLabel, onConfirmRoute }: PlannerProps = {}) {
   const [form, setForm] = useState<PlanRequest>({ ...DEFAULT, ...initialPlan });
   const [selectedId, setSelectedId] = useState('');
   const [hour, setHour] = useState(0);
@@ -199,7 +200,7 @@ export default function App({ initialPlan, fleetLink, onConfirmRoute }: PlannerP
   return (
     <div className="app-shell">
       <header className="app-header">
-        <a className="brand" href="/" aria-label="TruckMate home">
+        <a className="brand" href="/fleet" aria-label="TruckMate home">
           <span className="brand-mark">
             <svg viewBox="0 0 40 40" aria-hidden="true">
               <path d="M7 12h16v15H7zM23 18h6l5 6v3H23M23 24h11" />
@@ -212,8 +213,13 @@ export default function App({ initialPlan, fleetLink, onConfirmRoute }: PlannerP
           </span>
         </a>
         <div className="header-actions">
+          {fleetLink && (
+            <a className="help-button" href="/fleet/planner" aria-current="page">
+              Route Planner
+            </a>
+          )}
           <a className="help-button" href={fleetLink ?? '/fleet'}>
-            {fleetLink ? 'Back to job' : 'Fleet sign-in'}
+            {fleetLinkLabel ?? (fleetLink ? 'Back to job' : 'Fleet sign-in')}
           </a>
           <button className="help-button" aria-label="How it works" onClick={() => setMethod(true)}>
             <CircleHelp size={16} />

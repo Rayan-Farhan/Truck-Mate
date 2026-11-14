@@ -4,6 +4,18 @@ import { resolve } from 'node:path';
 
 // These tests never intercept API responses or substitute weather/routing data.
 // Run explicitly: npm run test:live. Providers and credentials must be configured.
+async function openDriverPlanner(page: Page) {
+  const { LIVE_DRIVER_EMAIL, LIVE_DRIVER_PASSWORD } = process.env;
+  if (!LIVE_DRIVER_EMAIL || !LIVE_DRIVER_PASSWORD) {
+    throw new Error('Set LIVE_DRIVER_EMAIL and LIVE_DRIVER_PASSWORD for a TruckMate driver.');
+  }
+  await page.goto('/fleet/planner');
+  await page.getByLabel('TruckMate email').fill(LIVE_DRIVER_EMAIL);
+  await page.getByLabel('Password', { exact: true }).fill(LIVE_DRIVER_PASSWORD);
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Find routes', exact: true })).toBeVisible();
+}
+
 const levels = ['low', 'moderate', 'high', 'severe', 'no_travel'];
 function band(value: number | null, limits: number[], strict = false) {
   if (value === null) return null;
@@ -200,7 +212,7 @@ for (const trip of cases) {
       if (r.url().endsWith('/api/analyses') && r.method() === 'POST' && r.postDataJSON().mode !== 'live')
         forbidden.push(r.postData() ?? '');
     });
-    await page.goto('/');
+    await openDriverPlanner(page);
     await expect(page.getByRole('button', { name: 'Demo', exact: true })).toHaveCount(0);
     await expect(page.getByLabel('Scenario', { exact: true })).toHaveCount(0);
     await page.getByRole('combobox', { name: 'FROM', exact: true }).fill(trip.origin);
@@ -337,7 +349,7 @@ test.describe('Live mobile workflow', () => {
   test('L07 live mobile map, table, layers and keyboard location selection', async ({ page }, info) => {
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
-    await page.goto('/');
+    await openDriverPlanner(page);
     const origin = page.getByRole('combobox', { name: 'FROM', exact: true });
     await origin.fill('Chicago');
     await expect(page.getByRole('option', { name: 'Chicago, IL', exact: true }).first()).toBeVisible();

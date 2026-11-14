@@ -119,6 +119,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 BEDROCK_ENABLED = os.getenv("BEDROCK_ENABLED", "false").lower() == "true"
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "amazon.nova-micro-v1:0")
+FLEET_VISION_MODEL_ID = os.getenv("FLEET_VISION_MODEL_ID", "")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 AI_TIMEOUT_SECONDS = min(10, max(1, float(os.getenv("AI_TIMEOUT_SECONDS", "5"))))
 AI_DAILY_LIMIT = max(0, int(os.getenv("AI_DAILY_LIMIT", "100")))

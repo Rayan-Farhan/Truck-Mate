@@ -30,7 +30,7 @@ from rest_framework.throttling import AnonRateThrottle
 
 from routing.api import PlaceSerializer
 
-from .models import Job, JobUpdate, Membership
+from .models import Job, JobUpdate, Membership, Notification, TripLocation, Truck
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ def member_for(user):
     if user.is_authenticated:
         return (
             Membership.objects.select_related("company")
-            .filter(user=user, active=True)
+            .filter(user=user, active=True, company__name="TruckMate")
             .first()
         )
     return None
@@ -53,6 +53,7 @@ def identity(member):
     return {
         "id": member.pk,
         "username": member.user.username,
+        "name": member.user.get_full_name() or member.user.username,
         "role": member.role,
         "company": member.company.name,
     }
@@ -108,7 +109,7 @@ def sign_in(request):
         password=data.get("password", ""),
     )
     member = member_for(user) if user else None
-    if member is None:
+    if member is None or data.get("portal", member.role) != member.role:
         return error("Invalid credentials or inactive account.", 401)
     login(request, user)
     return JsonResponse({"user": identity(member)})
@@ -124,7 +125,11 @@ def sign_out(request):
 
 def account_link(user):
     query = urlencode(
-        {"user": user.pk, "token": default_token_generator.make_token(user)}
+        {
+            "user": user.pk,
+            "token": default_token_generator.make_token(user),
+            "portal": user.membership.role,
+        }
     )
     return f"/fleet/reset#{query}"
 
@@ -150,7 +155,11 @@ def request_password(request):
         return error("Too many account requests. Try again shortly.", 429)
     username = credentials(request).get("username", "").strip().lower()
     user = User.objects.filter(
-        username=username, email__gt="", is_active=True, membership__active=True
+        username=username,
+        email__gt="",
+        is_active=True,
+        membership__active=True,
+        membership__company__name="TruckMate",
     ).first()
     if user:
         try:
@@ -177,6 +186,7 @@ def reset_password(request):
             pk=int(identifier),
             is_active=True,
             membership__active=True,
+            membership__company__name="TruckMate",
         )
         .first()
     )
@@ -216,18 +226,17 @@ class InviteSerializer(serializers.Serializer):
 
 
 class DriverSerializer(serializers.Serializer):
-    active = serializers.BooleanField()
+    active = serializers.BooleanField(required=False)
+    name = serializers.CharField(max_length=150, required=False)
 
 
 @never_cache
 @api_view(["GET", "POST"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
-def drivers(request):
+def drivers(request, role=Membership.Role.DRIVER):
     member = require_member(request, Membership.Role.ADMIN)
-    roster = Membership.objects.filter(
-        company=member.company, role=Membership.Role.DRIVER
-    )
+    roster = Membership.objects.filter(company=member.company, role=role)
     if request.method == "GET":
         return Response(
             [
@@ -252,7 +261,7 @@ def drivers(request):
                 invited = Membership.objects.create(
                     user=user,
                     company=member.company,
-                    role=Membership.Role.DRIVER,
+                    role=role,
                 )
         except IntegrityError:
             raise serializers.ValidationError(
@@ -298,6 +307,7 @@ def driver_setup_link(request, pk):
 @api_view(["PATCH"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def driver(request, pk):
     member = require_member(request, Membership.Role.ADMIN)
     form = DriverSerializer(data=request.data)
@@ -308,18 +318,89 @@ def driver(request, pk):
         company=member.company,
         role=Membership.Role.DRIVER,
     )
-    target.active = form.validated_data["active"]
-    target.save(update_fields=["active"])
+    if "active" in form.validated_data:
+        target.active = form.validated_data["active"]
+        target.save(update_fields=["active"])
+    if "name" in form.validated_data:
+        target.user.first_name = form.validated_data["name"]
+        target.user.save(update_fields=["first_name"])
     return Response(driver_data(target))
+
+
+class TruckInput(serializers.ModelSerializer):
+    capacity_lb = serializers.IntegerField(min_value=1, max_value=80000)
+
+    class Meta:
+        model = Truck
+        fields = ("id", "registration", "model", "capacity_lb", "available")
+
+
+@never_cache
+@api_view(["GET", "POST", "PATCH", "DELETE"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def trucks(request, pk=None):
+    member = require_member(request, Membership.Role.ADMIN)
+    queryset = Truck.objects.filter(company=member.company)
+    if pk is None and request.method == "GET":
+        return Response(TruckInput(queryset.order_by("registration"), many=True).data)
+    if (pk is None and request.method != "POST") or (
+        pk is not None and request.method not in ("PATCH", "DELETE")
+    ):
+        return Response(status=405)
+    truck = (
+        get_object_or_404(queryset.select_for_update(), pk=pk)
+        if pk is not None
+        else None
+    )
+    active_jobs = (
+        Job.objects.filter(truck=truck).exclude(status__in=TERMINAL)
+        if truck
+        else Job.objects.none()
+    )
+    if request.method == "DELETE":
+        if Job.objects.filter(truck=truck).exists():
+            raise serializers.ValidationError(
+                "This truck has delivery history. Mark it unavailable instead."
+            )
+        truck.delete()
+        return Response(status=204)
+    form = TruckInput(truck, data=request.data, partial=truck is not None)
+    form.is_valid(raise_exception=True)
+    capacity = form.validated_data.get("capacity_lb")
+    if (
+        capacity is not None
+        and active_jobs.filter(load_weight_lb__gt=capacity).exists()
+    ):
+        raise serializers.ValidationError(
+            "Capacity is below the weight of an active delivery."
+        )
+    try:
+        with transaction.atomic():
+            form.save(company=member.company)
+    except IntegrityError:
+        raise serializers.ValidationError(
+            {"registration": "This registration is already in your fleet."}
+        )
+    return Response(form.data, status=200 if pk is not None else 201)
 
 
 class JobInput(serializers.Serializer):
     driver = serializers.IntegerField(min_value=1)
+    truck = serializers.IntegerField(min_value=1, required=False, allow_null=True)
     origin = PlaceSerializer()
     destination = PlaceSerializer()
     departure = serializers.DateTimeField()
     deadline = serializers.DateTimeField()
     load_weight_lb = serializers.IntegerField(min_value=0, max_value=80000)
+    cargo_type = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    customer_name = serializers.CharField(
+        max_length=150, required=False, allow_blank=True
+    )
+    instructions = serializers.CharField(
+        max_length=1000, required=False, allow_blank=True
+    )
 
     def validate(self, attrs):
         if attrs["deadline"] <= attrs["departure"]:
@@ -338,6 +419,48 @@ class JobInput(serializers.Serializer):
             active=True,
             role=Membership.Role.DRIVER,
         )
+        truck_id = attrs.get("truck", self.instance.truck_id if self.instance else None)
+        current_id = self.instance.pk if self.instance else None
+        overlaps = (
+            Job.objects.filter(
+                driver=attrs["driver"],
+                departure__lt=attrs["deadline"],
+                deadline__gt=attrs["departure"],
+            )
+            .exclude(status__in=TERMINAL)
+            .exclude(pk=current_id)
+        )
+        if overlaps.exists():
+            raise serializers.ValidationError(
+                {"driver": "This driver has an overlapping assignment."}
+            )
+        if truck_id:
+            truck = get_object_or_404(
+                Truck.objects.select_for_update(),
+                pk=truck_id,
+                company=self.context["member"].company,
+            )
+            current = self.instance
+            if not truck.available and (
+                current is None or current.truck_id != truck.pk
+            ):
+                raise serializers.ValidationError(
+                    {"truck": "Choose an available truck."}
+                )
+            if truck.capacity_lb < attrs["load_weight_lb"]:
+                raise serializers.ValidationError(
+                    {"truck": "Truck capacity is below the cargo weight."}
+                )
+            conflicts = Job.objects.filter(
+                truck=truck,
+                departure__lt=attrs["deadline"],
+                deadline__gt=attrs["departure"],
+            ).exclude(status__in=TERMINAL)
+            if conflicts.exclude(pk=current.pk if current else None).exists():
+                raise serializers.ValidationError(
+                    {"truck": "This truck has an overlapping assignment."}
+                )
+            attrs["truck"] = truck
         return attrs
 
 
@@ -385,6 +508,9 @@ def job_data(job, detail=False):
             "departure",
             "deadline",
             "load_weight_lb",
+            "cargo_type",
+            "customer_name",
+            "instructions",
             "status",
             "eta",
             "eta_updated_at",
@@ -394,6 +520,10 @@ def job_data(job, detail=False):
         )
     }
     data.update(driver_name=driver_data(job.driver)["name"], risk=risk(job))
+    data.update(
+        truck_id=job.truck_id,
+        truck_registration=job.truck.registration if job.truck else None,
+    )
     if detail:
         data["history"] = list(
             job.history.order_by("-pk").values("status", "eta", "note", "created_at")
@@ -402,7 +532,9 @@ def job_data(job, detail=False):
 
 
 def scoped_jobs(member):
-    queryset = Job.objects.filter(company=member.company).select_related("driver__user")
+    queryset = Job.objects.filter(company=member.company).select_related(
+        "driver__user", "truck"
+    )
     if member.role == Membership.Role.DRIVER:
         queryset = queryset.filter(driver=member)
     return queryset
@@ -424,6 +556,9 @@ def jobs(request):
     form.is_valid(raise_exception=True)
     item = Job.objects.create(company=member.company, **form.validated_data)
     record(item, member, "Job assigned")
+    Notification.objects.create(
+        recipient=item.driver, job=item, message="A delivery was assigned to you."
+    )
     return Response(job_data(item, detail=True), status=201)
 
 
@@ -441,7 +576,7 @@ def job(request, pk):
     item = get_object_or_404(queryset.select_for_update(of=("self",)), pk=pk)
     if item.status in TERMINAL:
         raise serializers.ValidationError("This job is closed.")
-    form = JobInput(data=request.data, context={"member": member})
+    form = JobInput(item, data=request.data, context={"member": member})
     form.is_valid(raise_exception=True)
     data = form.validated_data
     if any(
@@ -451,10 +586,14 @@ def job(request, pk):
         item.route = item.eta = item.eta_updated_at = None
     if item.driver != data["driver"]:
         item.status = Job.Status.ASSIGNED
+        TripLocation.objects.filter(job=item).delete()
     for key, value in data.items():
         setattr(item, key, value)
     item.save()
     record(item, member, "Assignment updated")
+    Notification.objects.create(
+        recipient=item.driver, job=item, message="Your delivery assignment was updated."
+    )
     return Response(job_data(item, detail=True))
 
 
@@ -480,6 +619,12 @@ def confirm_route(item, data):
         key: route[key]
         for key in ("id", "label", "road", "distance_m", "duration_s", "worst_level")
     }
+    checkpoints = route.get("checkpoints", [])
+    stride = max(1, (len(checkpoints) + 23) // 24)
+    item.route["forecast_points"] = [
+        {"coordinates": point["coordinates"], "elapsed_s": point["elapsed_s"]}
+        for point in checkpoints[::stride]
+    ]
     item.eta = serializers.DateTimeField().to_internal_value(route["arrival_utc"])
     item.eta_updated_at = timezone.now()
 
@@ -490,6 +635,8 @@ def confirm_route(item, data):
 @permission_classes([IsAuthenticated])
 @transaction.atomic
 def update_job(request, pk):
+    from .operations import notify_admins
+
     member = require_member(request)
     item = get_object_or_404(scoped_jobs(member).select_for_update(of=("self",)), pk=pk)
     form = UpdateInput(data=request.data)
@@ -503,6 +650,9 @@ def update_job(request, pk):
             raise PermissionDenied()
     elif status not in (
         None,
+        Job.Status.ACCEPTED,
+        Job.Status.ARRIVED,
+        Job.Status.PICKED_UP,
         Job.Status.EN_ROUTE,
         Job.Status.DELAYED,
         Job.Status.DELIVERED,
@@ -530,4 +680,20 @@ def update_job(request, pk):
         item.delivered_at = timezone.now()
     item.save()
     record(item, member, data.get("note", ""))
+    if status == Job.Status.CANCELLED:
+        Notification.objects.create(
+            recipient=item.driver, job=item, message="Your delivery was cancelled."
+        )
+    elif status == Job.Status.DELAYED:
+        notify_admins(item, "A driver reported a delay.")
+    elif "route_id" in data and (item.route or {}).get("worst_level") in (
+        "severe",
+        "no_travel",
+    ):
+        notify_admins(item, "The selected route has severe weather exposure.")
+        Notification.objects.create(
+            recipient=item.driver,
+            job=item,
+            message="The selected route has severe weather exposure.",
+        )
     return Response(job_data(item, detail=True))
