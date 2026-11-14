@@ -18,6 +18,25 @@ jobs:
     env:
       DJANGO_DEBUG: 'true'
       DJANGO_SECRET_KEY: ci-only-not-for-deployment
+      DB_HOST: 127.0.0.1
+      DB_NAME: truckmate
+      DB_USER: truckmate
+      DB_PASSWORD: ci-only
+      DB_SSLMODE: disable
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: truckmate
+          POSTGRES_USER: truckmate
+          POSTGRES_PASSWORD: ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U truckmate -d truckmate"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -29,7 +48,8 @@ jobs:
           cache-dependency-path: backend/requirements.lock
       - run: pip install -r backend/requirements.lock
       - run: python backend/manage.py check
-      - run: python backend/manage.py test routing.tests
+      - run: python backend/manage.py makemigrations --check --dry-run
+      - run: python backend/manage.py test routing.tests fleet
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 15

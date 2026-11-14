@@ -1,0 +1,203 @@
+.fleet-shell {
+  min-height: 100dvh;
+  background: #edf2f6;
+  color: #142839;
+}
+
+.fleet-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.85rem clamp(1rem, 4vw, 3rem);
+  background: #fff;
+  border-bottom: 1px solid #d6e0e8;
+}
+
+.fleet-header nav,
+.fleet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.fleet-main {
+  width: min(100% - 2rem, 76rem);
+  margin-inline: auto;
+  padding-block: 1.5rem 3rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.fleet-main h1 {
+  font-size: clamp(1.5rem, 4vw, 2.2rem);
+  font-weight: 750;
+}
+.fleet-main h2 {
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin-bottom: 0.75rem;
+}
+.fleet-main a,
+.fleet-header nav a {
+  color: #205183;
+  text-decoration: underline;
+}
+.fleet-panel {
+  min-width: 0;
+  padding: clamp(0.85rem, 3vw, 1.35rem);
+  background: #fff;
+  border: 1px solid #d6e0e8;
+  border-radius: 0.8rem;
+}
+
+.fleet-account {
+  width: min(100%, 26rem);
+  margin: 2rem auto;
+}
+.fleet-account h1 {
+  margin-bottom: 1rem;
+}
+.fleet-grid,
+.fleet-fields,
+.fleet-details {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.fleet-form {
+  display: grid;
+  gap: 0.8rem;
+  margin-block: 0.75rem;
+}
+.fleet-form label {
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+.fleet-form input,
+.fleet-form select {
+  min-width: 0;
+  width: 100%;
+  min-height: 2.5rem;
+  border: 1px solid #b2c3d1;
+  border-radius: 0.4rem;
+  padding-inline: 0.55rem;
+  font-weight: 400;
+  background: #fff;
+}
+
+.fleet-shell button,
+.fleet-shell a.fleet-primary {
+  width: fit-content;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid #b2c3d1;
+  border-radius: 0.45rem;
+  cursor: pointer;
+}
+
+.fleet-shell button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.fleet-shell .fleet-primary {
+  background: #205183;
+  color: #fff;
+  text-decoration: none;
+}
+.fleet-shell .fleet-text-button {
+  border-color: transparent;
+  color: #205183;
+  padding-inline: 0;
+}
+.fleet-list {
+  display: grid;
+  margin-top: 0.5rem;
+}
+.fleet-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  border-top: 1px solid #d6e0e8;
+  padding-block: 0.6rem;
+  overflow-wrap: anywhere;
+}
+
+.fleet-list small {
+  display: block;
+  color: #435d70;
+}
+.fleet-table {
+  overflow-x: auto;
+}
+.fleet-table table {
+  width: 100%;
+  text-align: left;
+  font-size: 0.9rem;
+}
+.fleet-table th,
+.fleet-table td {
+  padding: 0.65rem 0.45rem;
+  border-bottom: 1px solid #e3ebf1;
+}
+.fleet-table td {
+  min-width: 6rem;
+}
+.fleet-state {
+  text-transform: capitalize;
+}
+.fleet-state[data-risk='at_risk'],
+.fleet-state[data-risk='overdue'],
+.fleet-main [role='alert'] {
+  color: #a31b24;
+}
+.fleet-state[data-risk='stale_eta'],
+.fleet-state[data-risk='missing_eta'] {
+  color: #755500;
+}
+.fleet-details dt {
+  font-size: 0.85rem;
+  color: #435d70;
+}
+.fleet-details dd {
+  font-weight: 650;
+}
+.fleet-planner-feedback {
+  padding: 0.5rem 1rem;
+  background: #fcebd0;
+  color: #142839;
+}
+
+@media (max-width: 680px) {
+  .fleet-grid {
+    grid-template-columns: 1fr;
+  }
+  .fleet-table thead {
+    position: absolute;
+    clip-path: inset(50%);
+  }
+  .fleet-table tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-block: 0.5rem;
+    border-bottom: 1px solid #e3ebf1;
+  }
+  .fleet-table th[scope='row'] {
+    grid-column: 1 / -1;
+  }
+  .fleet-table td,
+  .fleet-table th {
+    min-width: 0;
+    border: 0;
+  }
+  .fleet-table td::before {
+    content: attr(data-label);
+    display: block;
+    color: #435d70;
+    font-size: 0.75rem;
+  }
+}

@@ -36,7 +36,7 @@ The hosted app needs no installation or API keys from the visitor. Coverage is c
 | Application runtime       | Docker, Gunicorn, WhiteNoise                     | Containerized backend and built frontend                 |
 | Verification and delivery | Django tests, Vitest, Playwright, GitHub Actions | Calculation tests, browser checks and versioned delivery |
 
-The backend separates provider integrations, geometry, risk calculations and presentation. It calculates the recommendation before requesting any AI briefing. Trip analyses use a bounded in-memory cache; no persistent database or job queue is required.
+The backend separates provider integrations, geometry, risk calculations and presentation. It calculates the recommendation before requesting any AI briefing. Trip analyses use a bounded in-memory cache. Fleet accounts, jobs and progress history are stored in the database.
 
 ## AWS hosting and delivery
 
@@ -140,7 +140,24 @@ Select **Generate briefing** after planning a trip to request an optional driver
 
 ## Run locally
 
-Local development requires **Python 3.11+, Node.js 24 and npm**. Docker and a database are not required.
+### Fleet workspaces
+
+The existing planner is at `/`. Open `/fleet` to sign in as a dispatcher or driver. Before starting Django locally, migrate the database and create the first dispatcher from the project root:
+
+```powershell
+.\.venv\Scripts\python.exe backend\manage.py migrate
+.\.venv\Scripts\python.exe backend\manage.py create_fleet "Example Fleet" admin@example.com
+```
+
+Direct development uses SQLite by default. Docker Compose uses PostgreSQL with a persistent volume. To create a dispatcher in Compose, run `docker compose exec web python backend/manage.py create_fleet "Example Fleet" admin@example.com`.
+
+Dispatchers can invite drivers, assign deliveries and review deadlines, check-ins and ETA risk. Drivers can open an assigned delivery in the existing planner, save a route and ETA, and report progress. When `FLEET_EMAIL_ENABLED=false`, the dispatcher can generate a one-time setup or reset link to share privately. Development email uses Django’s console backend by default. For hosted email, configure `FLEET_EMAIL_ENABLED=true`, a verified sender, SMTP credentials and `FLEET_PUBLIC_ORIGIN` in the application settings secret.
+
+For AWS hosting, use [the RDS template](deploy/fleet-rds.yml) to provision the private database. Set `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` and `DB_PASSWORD` in the existing application settings secret. Create a dedicated PostgreSQL login that owns the application schema and can run migrations. Set `DJANGO_CSRF_TRUSTED_ORIGINS` to the public HTTPS URL. The CloudFront origin request policy must forward `sessionid` and `csrftoken`, and fleet API responses must bypass caching. The container applies migrations before starting Gunicorn.
+
+### Planner development
+
+Local development requires **Python 3.11+, Node.js 24 and npm**. Direct development uses the SQLite database bundled with Python.
 
 ### Install and configure
 
@@ -182,14 +199,14 @@ npm run dev
 
 Open **http://127.0.0.1:5173/**. Restart the backend after changing `.env`.
 
-For a local container build, set a persistent random `DJANGO_SECRET_KEY` in `.env`, then run `docker compose up --build` and open **http://127.0.0.1:8000/**. Compose uses `DJANGO_DEBUG=false`. The hosted deployment loads these production settings from AWS Secrets Manager.
+For a local container build, run `docker compose up --build` and open **http://127.0.0.1:8000/**. The hosted deployment loads its production settings from AWS Secrets Manager.
 
 ### Run checks
 
 From the project root:
 
 ```powershell
-.\.venv\Scripts\python.exe backend\manage.py test routing.tests
+.\.venv\Scripts\python.exe backend\manage.py test routing.tests fleet
 cd frontend
 npm run test
 npm run build

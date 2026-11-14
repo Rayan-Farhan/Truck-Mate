@@ -124,8 +124,14 @@ function MethodDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-export default function App() {
-  const [form, setForm] = useState<PlanRequest>(DEFAULT);
+interface PlannerProps {
+  initialPlan?: Partial<PlanRequest>;
+  fleetLink?: string;
+  onConfirmRoute?: (analysis: Analysis, route: Analysis['routes'][number]) => void;
+}
+
+export default function App({ initialPlan, fleetLink, onConfirmRoute }: PlannerProps = {}) {
+  const [form, setForm] = useState<PlanRequest>({ ...DEFAULT, ...initialPlan });
   const [selectedId, setSelectedId] = useState('');
   const [hour, setHour] = useState(0);
   const [layer, setLayer] = useState<Layer>('wind');
@@ -206,6 +212,9 @@ export default function App() {
           </span>
         </a>
         <div className="header-actions">
+          <a className="help-button" href={fleetLink ?? '/fleet'}>
+            {fleetLink ? 'Back to job' : 'Fleet sign-in'}
+          </a>
           <button className="help-button" aria-label="How it works" onClick={() => setMethod(true)}>
             <CircleHelp size={16} />
             <span>How it works</span>
@@ -225,6 +234,11 @@ export default function App() {
       <main className="workspace">
         <aside className={`sidebar ${mobileTab === 'plan' ? 'mobile-active' : ''}`}>
           <h1 className="sr-only">Route planner</h1>
+          {onConfirmRoute && selected && analysis && !formChanged && (
+            <button className="help-button" type="button" onClick={() => onConfirmRoute(analysis, selected)}>
+              Save selected route and ETA to job
+            </button>
+          )}
           <form onSubmit={submit} className="trip-form" aria-label="Trip planning form">
             {config.isSuccess && !config.data.live_routing && (
               <p className="configuration-note">
@@ -237,11 +251,13 @@ export default function App() {
                 label="FROM"
                 value={form.origin ?? CHICAGO}
                 onChange={(p: Place) => update('origin', p)}
+                disabled={Boolean(initialPlan?.origin)}
               />
               <button
                 type="button"
                 className="swap-places"
                 aria-label="Swap origin and destination"
+                disabled={Boolean(initialPlan?.origin)}
                 onClick={() => setForm((f) => ({ ...f, origin: f.destination, destination: f.origin }))}
               >
                 <ArrowDownUp size={13} />
@@ -250,6 +266,7 @@ export default function App() {
                 label="TO"
                 value={form.destination ?? DENVER}
                 onChange={(p: Place) => update('destination', p)}
+                disabled={Boolean(initialPlan?.destination)}
               />
             </div>
             <div className="form-label-row">
@@ -279,12 +296,15 @@ export default function App() {
               }}
             >
               {[
-                'America/Chicago',
-                'America/New_York',
-                'America/Denver',
-                'America/Los_Angeles',
-                'Asia/Karachi',
-                'UTC',
+                ...new Set([
+                  'America/Chicago',
+                  'America/New_York',
+                  'America/Denver',
+                  'America/Los_Angeles',
+                  'Asia/Karachi',
+                  'UTC',
+                  form.timezone,
+                ]),
               ].map((z) => (
                 <option key={z} value={z}>
                   {z.replaceAll('_', ' ')}
@@ -304,6 +324,7 @@ export default function App() {
                 step="any"
                 required
                 value={Number.isFinite(form.load_weight_lb) ? form.load_weight_lb : ''}
+                readOnly={initialPlan?.load_weight_lb !== undefined}
                 onChange={(e) =>
                   update('load_weight_lb', e.target.value === '' ? NaN : Number(e.target.value))
                 }
