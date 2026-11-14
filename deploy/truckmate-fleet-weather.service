@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh TruckMate route weather alerts
+After=docker.service truckmate.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker exec truckmate python backend/manage.py refresh_fleet_weather
+TimeoutStartSec=20min
