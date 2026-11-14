@@ -16,7 +16,7 @@ export async function request<T>(
 ): Promise<T> {
   const headers = new Headers();
   if (body !== undefined) headers.set('Content-Type', 'application/json');
-  if (body !== undefined && path.startsWith('/fleet/')) {
+  if ((body !== undefined || method === 'DELETE') && path.startsWith('/fleet/')) {
     const cookie = document.cookie.split('; ').find((value) => value.startsWith('csrftoken='));
     if (cookie) headers.set('X-CSRFToken', decodeURIComponent(cookie.slice('csrftoken='.length)));
   }
@@ -26,6 +26,7 @@ export async function request<T>(
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
   });
+  if (response.status === 204) return undefined as T;
   let data;
   try {
     data = await response.json();

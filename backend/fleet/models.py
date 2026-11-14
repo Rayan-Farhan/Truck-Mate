@@ -17,9 +17,28 @@ class Membership(models.Model):
     active = models.BooleanField(default=True)
 
 
+class Truck(models.Model):
+    company = models.ForeignKey(Company, on_delete=models.PROTECT)
+    registration = models.CharField(max_length=32)
+    model = models.CharField(max_length=100)
+    capacity_lb = models.PositiveIntegerField()
+    available = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["company", "registration"],
+                name="fleet_truck_registration_unique",
+            )
+        ]
+
+
 class Job(models.Model):
     class Status(models.TextChoices):
         ASSIGNED = "assigned", "Assigned"
+        ACCEPTED = "accepted", "Accepted"
+        ARRIVED = "arrived", "Arrived at pickup"
+        PICKED_UP = "picked_up", "Picked up"
         EN_ROUTE = "en_route", "En route"
         DELAYED = "delayed", "Delayed"
         DELIVERED = "delivered", "Delivered"
@@ -27,11 +46,15 @@ class Job(models.Model):
 
     company = models.ForeignKey(Company, on_delete=models.PROTECT)
     driver = models.ForeignKey(Membership, on_delete=models.PROTECT)
+    truck = models.ForeignKey(Truck, on_delete=models.PROTECT, null=True, blank=True)
     origin = models.JSONField()
     destination = models.JSONField()
     departure = models.DateTimeField()
     deadline = models.DateTimeField()
     load_weight_lb = models.PositiveIntegerField()
+    cargo_type = models.CharField(max_length=100, blank=True)
+    customer_name = models.CharField(max_length=150, blank=True)
+    instructions = models.CharField(max_length=1000, blank=True)
     status = models.CharField(
         max_length=10, choices=Status.choices, default=Status.ASSIGNED
     )

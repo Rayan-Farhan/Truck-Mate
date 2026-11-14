@@ -149,6 +149,8 @@ The existing planner is at `/`. Open `/fleet` to sign in as a dispatcher or driv
 .\.venv\Scripts\python.exe backend\manage.py create_fleet "Example Fleet" admin@example.com
 ```
 
+You can also register a new company at `/fleet/register`. The registration creates its first admin. Drivers join through an invitation from their fleet. The password recovery form is at `/fleet/recover`.
+
 Direct development uses SQLite by default. Docker Compose uses PostgreSQL with a persistent volume. To create a dispatcher in Compose, run `docker compose exec web python backend/manage.py create_fleet "Example Fleet" admin@example.com`.
 
 Dispatchers can invite drivers, assign deliveries and review deadlines, check-ins and ETA risk. Drivers can open an assigned delivery in the existing planner, save a route and ETA, and report progress. When `FLEET_EMAIL_ENABLED=false`, the dispatcher can generate a one-time setup or reset link to share privately. Development email uses Django’s console backend by default. For hosted email, configure `FLEET_EMAIL_ENABLED=true`, a verified sender, SMTP credentials and `FLEET_PUBLIC_ORIGIN` in the application settings secret.

@@ -30,7 +30,7 @@ from rest_framework.throttling import AnonRateThrottle
 
 from routing.api import PlaceSerializer
 
-from .models import Job, JobUpdate, Membership
+from .models import Company, Job, JobUpdate, Membership, Truck
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -120,6 +120,45 @@ def sign_in(request):
 def sign_out(request):
     logout(request)
     return JsonResponse({"user": None})
+
+
+class CompanyRegistration(serializers.Serializer):
+    company = serializers.CharField(max_length=150)
+    email = serializers.EmailField(max_length=150)
+    password = serializers.CharField(
+        max_length=128, trim_whitespace=False, write_only=True
+    )
+
+
+@never_cache
+@require_POST
+@csrf_protect
+def register(request):
+    if not AccountThrottle().allow_request(request, None):
+        return error("Too many account requests. Try again shortly.", 429)
+    form = CompanyRegistration(data=credentials(request))
+    if not form.is_valid():
+        return error(" ".join(str(messages[0]) for messages in form.errors.values()))
+    data = form.validated_data
+    email = data["email"].lower()
+    user = User(username=email, email=email)
+    try:
+        validate_password(data["password"], user)
+    except ValidationError as exc:
+        return error(" ".join(exc.messages))
+    try:
+        with transaction.atomic():
+            user.set_password(data["password"])
+            user.save()
+            company = Company.objects.create(name=data["company"])
+            Membership.objects.create(
+                user=user, company=company, role=Membership.Role.ADMIN
+            )
+    except IntegrityError:
+        return error(
+            "An account already uses that email. Sign in or reset your password.", 409
+        )
+    return JsonResponse({"ok": True}, status=201)
 
 
 def account_link(user):
@@ -216,7 +255,8 @@ class InviteSerializer(serializers.Serializer):
 
 
 class DriverSerializer(serializers.Serializer):
-    active = serializers.BooleanField()
+    active = serializers.BooleanField(required=False)
+    name = serializers.CharField(max_length=150, required=False)
 
 
 @never_cache
@@ -298,6 +338,7 @@ def driver_setup_link(request, pk):
 @api_view(["PATCH"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def driver(request, pk):
     member = require_member(request, Membership.Role.ADMIN)
     form = DriverSerializer(data=request.data)
@@ -308,18 +349,89 @@ def driver(request, pk):
         company=member.company,
         role=Membership.Role.DRIVER,
     )
-    target.active = form.validated_data["active"]
-    target.save(update_fields=["active"])
+    if "active" in form.validated_data:
+        target.active = form.validated_data["active"]
+        target.save(update_fields=["active"])
+    if "name" in form.validated_data:
+        target.user.first_name = form.validated_data["name"]
+        target.user.save(update_fields=["first_name"])
     return Response(driver_data(target))
+
+
+class TruckInput(serializers.ModelSerializer):
+    capacity_lb = serializers.IntegerField(min_value=1, max_value=80000)
+
+    class Meta:
+        model = Truck
+        fields = ("id", "registration", "model", "capacity_lb", "available")
+
+
+@never_cache
+@api_view(["GET", "POST", "PATCH", "DELETE"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def trucks(request, pk=None):
+    member = require_member(request, Membership.Role.ADMIN)
+    queryset = Truck.objects.filter(company=member.company)
+    if pk is None and request.method == "GET":
+        return Response(TruckInput(queryset.order_by("registration"), many=True).data)
+    if (pk is None and request.method != "POST") or (
+        pk is not None and request.method not in ("PATCH", "DELETE")
+    ):
+        return Response(status=405)
+    truck = (
+        get_object_or_404(queryset.select_for_update(), pk=pk)
+        if pk is not None
+        else None
+    )
+    active_jobs = (
+        Job.objects.filter(truck=truck).exclude(status__in=TERMINAL)
+        if truck
+        else Job.objects.none()
+    )
+    if request.method == "DELETE":
+        if Job.objects.filter(truck=truck).exists():
+            raise serializers.ValidationError(
+                "This truck has delivery history. Mark it unavailable instead."
+            )
+        truck.delete()
+        return Response(status=204)
+    form = TruckInput(truck, data=request.data, partial=truck is not None)
+    form.is_valid(raise_exception=True)
+    capacity = form.validated_data.get("capacity_lb")
+    if (
+        capacity is not None
+        and active_jobs.filter(load_weight_lb__gt=capacity).exists()
+    ):
+        raise serializers.ValidationError(
+            "Capacity is below the weight of an active delivery."
+        )
+    try:
+        with transaction.atomic():
+            form.save(company=member.company)
+    except IntegrityError:
+        raise serializers.ValidationError(
+            {"registration": "This registration is already in your fleet."}
+        )
+    return Response(form.data, status=200 if pk is not None else 201)
 
 
 class JobInput(serializers.Serializer):
     driver = serializers.IntegerField(min_value=1)
+    truck = serializers.IntegerField(min_value=1, required=False, allow_null=True)
     origin = PlaceSerializer()
     destination = PlaceSerializer()
     departure = serializers.DateTimeField()
     deadline = serializers.DateTimeField()
     load_weight_lb = serializers.IntegerField(min_value=0, max_value=80000)
+    cargo_type = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    customer_name = serializers.CharField(
+        max_length=150, required=False, allow_blank=True
+    )
+    instructions = serializers.CharField(
+        max_length=1000, required=False, allow_blank=True
+    )
 
     def validate(self, attrs):
         if attrs["deadline"] <= attrs["departure"]:
@@ -338,6 +450,48 @@ class JobInput(serializers.Serializer):
             active=True,
             role=Membership.Role.DRIVER,
         )
+        truck_id = attrs.get("truck", self.instance.truck_id if self.instance else None)
+        current_id = self.instance.pk if self.instance else None
+        overlaps = (
+            Job.objects.filter(
+                driver=attrs["driver"],
+                departure__lt=attrs["deadline"],
+                deadline__gt=attrs["departure"],
+            )
+            .exclude(status__in=TERMINAL)
+            .exclude(pk=current_id)
+        )
+        if overlaps.exists():
+            raise serializers.ValidationError(
+                {"driver": "This driver has an overlapping assignment."}
+            )
+        if truck_id:
+            truck = get_object_or_404(
+                Truck.objects.select_for_update(),
+                pk=truck_id,
+                company=self.context["member"].company,
+            )
+            current = self.instance
+            if not truck.available and (
+                current is None or current.truck_id != truck.pk
+            ):
+                raise serializers.ValidationError(
+                    {"truck": "Choose an available truck."}
+                )
+            if truck.capacity_lb < attrs["load_weight_lb"]:
+                raise serializers.ValidationError(
+                    {"truck": "Truck capacity is below the cargo weight."}
+                )
+            conflicts = Job.objects.filter(
+                truck=truck,
+                departure__lt=attrs["deadline"],
+                deadline__gt=attrs["departure"],
+            ).exclude(status__in=TERMINAL)
+            if conflicts.exclude(pk=current.pk if current else None).exists():
+                raise serializers.ValidationError(
+                    {"truck": "This truck has an overlapping assignment."}
+                )
+            attrs["truck"] = truck
         return attrs
 
 
@@ -385,6 +539,9 @@ def job_data(job, detail=False):
             "departure",
             "deadline",
             "load_weight_lb",
+            "cargo_type",
+            "customer_name",
+            "instructions",
             "status",
             "eta",
             "eta_updated_at",
@@ -394,6 +551,10 @@ def job_data(job, detail=False):
         )
     }
     data.update(driver_name=driver_data(job.driver)["name"], risk=risk(job))
+    data.update(
+        truck_id=job.truck_id,
+        truck_registration=job.truck.registration if job.truck else None,
+    )
     if detail:
         data["history"] = list(
             job.history.order_by("-pk").values("status", "eta", "note", "created_at")
@@ -402,7 +563,9 @@ def job_data(job, detail=False):
 
 
 def scoped_jobs(member):
-    queryset = Job.objects.filter(company=member.company).select_related("driver__user")
+    queryset = Job.objects.filter(company=member.company).select_related(
+        "driver__user", "truck"
+    )
     if member.role == Membership.Role.DRIVER:
         queryset = queryset.filter(driver=member)
     return queryset
@@ -441,7 +604,7 @@ def job(request, pk):
     item = get_object_or_404(queryset.select_for_update(of=("self",)), pk=pk)
     if item.status in TERMINAL:
         raise serializers.ValidationError("This job is closed.")
-    form = JobInput(data=request.data, context={"member": member})
+    form = JobInput(item, data=request.data, context={"member": member})
     form.is_valid(raise_exception=True)
     data = form.validated_data
     if any(
@@ -503,6 +666,9 @@ def update_job(request, pk):
             raise PermissionDenied()
     elif status not in (
         None,
+        Job.Status.ACCEPTED,
+        Job.Status.ARRIVED,
+        Job.Status.PICKED_UP,
         Job.Status.EN_ROUTE,
         Job.Status.DELAYED,
         Job.Status.DELIVERED,

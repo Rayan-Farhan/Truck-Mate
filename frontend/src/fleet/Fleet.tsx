@@ -20,10 +20,23 @@ interface Driver {
   active: boolean;
 }
 
+interface Truck {
+  id: number;
+  registration: string;
+  model: string;
+  capacity_lb: number;
+  available: boolean;
+}
+
 interface Job {
   id: number;
   driver_id: number;
   driver_name: string;
+  truck_id: number | null;
+  truck_registration: string | null;
+  cargo_type: string;
+  customer_name: string;
+  instructions: string;
   origin: Place;
   destination: Place;
   departure: string;
@@ -81,7 +94,16 @@ function Layout({ user, children }: { user?: User; children: ReactNode }) {
     <div className="fleet-shell">
       <header className="fleet-header">
         <a className="brand" href="/fleet">
-          TruckMate<span className="brand-period">.</span>
+          <span className="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 40 40">
+              <path d="M7 12h16v15H7zM23 18h6l5 6v3H23M23 24h11" />
+              <circle cx="13" cy="29" r="3" />
+              <circle cx="28" cy="29" r="3" />
+            </svg>
+          </span>
+          <span>
+            TruckMate<span className="brand-period">.</span>
+          </span>
         </a>
         <nav aria-label="Fleet navigation">
           <a href="/">Route planner</a>
@@ -108,8 +130,10 @@ function Layout({ user, children }: { user?: User; children: ReactNode }) {
   );
 }
 
-function Account({ reset, emailEnabled }: { reset: boolean; emailEnabled: boolean }) {
-  const [recovery, setRecovery] = useState(false);
+function Account({ page, emailEnabled }: { page: string; emailEnabled: boolean }) {
+  const reset = page === '/fleet/reset';
+  const recovery = page === '/fleet/recover';
+  const register = page === '/fleet/register';
   const [sent, setSent] = useState(false);
   const action = useAction();
   const params = new URLSearchParams(location.hash.slice(1));
@@ -121,6 +145,9 @@ function Account({ reset, emailEnabled }: { reset: boolean; emailEnabled: boolea
       if (reset) {
         await fleet('password/reset', { ...data, user: params.get('user'), token: params.get('token') });
         location.replace('/fleet');
+      } else if (register) {
+        await fleet('register', { ...data, email: data.username });
+        location.replace('/fleet?registered=1');
       } else if (recovery) {
         await fleet('password/request', data);
         setSent(true);
@@ -133,11 +160,30 @@ function Account({ reset, emailEnabled }: { reset: boolean; emailEnabled: boolea
   return (
     <Layout>
       <section className="fleet-panel fleet-account">
-        <h1>{reset ? 'Set your password' : recovery ? 'Reset your password' : 'Fleet sign-in'}</h1>
+        <h1>
+          {register
+            ? 'Register your fleet'
+            : reset
+              ? 'Set your password'
+              : recovery
+                ? 'Reset your password'
+                : 'Fleet sign-in'}
+        </h1>
+        {page === '/fleet' && new URLSearchParams(location.search).has('registered') && (
+          <p role="status">Your fleet is ready. Sign in with your new account.</p>
+        )}
         {sent ? (
           <p role="status">If the account exists, we’ll send a password reset link.</p>
+        ) : recovery && !emailEnabled ? (
+          <p>Email recovery is unavailable. Contact your fleet administrator or support for a reset link.</p>
         ) : (
           <form className="fleet-form" onSubmit={submit}>
+            {register && (
+              <label>
+                Company name
+                <input name="company" autoComplete="organization" required maxLength={150} />
+              </label>
+            )}
             {!reset && (
               <label>
                 Email
@@ -151,37 +197,46 @@ function Account({ reset, emailEnabled }: { reset: boolean; emailEnabled: boolea
                   name="password"
                   type="password"
                   required
-                  autoComplete={reset ? 'new-password' : 'current-password'}
+                  autoComplete={reset || register ? 'new-password' : 'current-password'}
                 />
               </label>
             )}
             <button className="fleet-primary" disabled={action.busy}>
-              {reset ? 'Save password' : recovery ? 'Send reset link' : 'Sign in'}
+              {register
+                ? 'Create fleet account'
+                : reset
+                  ? 'Save password'
+                  : recovery
+                    ? 'Send reset link'
+                    : 'Sign in'}
             </button>
           </form>
         )}
         {action.message && <p role="alert">{action.message}</p>}
-        {reset ? (
+        {reset || recovery || register ? (
           <a href="/fleet">Back to sign-in</a>
-        ) : emailEnabled ? (
-          <button
-            className="fleet-text-button"
-            onClick={() => {
-              setRecovery(!recovery);
-              setSent(false);
-            }}
-          >
-            {recovery ? 'Back to sign-in' : 'Forgot your password?'}
-          </button>
         ) : (
-          <p>For a password reset, contact your fleet administrator.</p>
+          <nav className="fleet-actions" aria-label="Account options">
+            <a href="/fleet/recover">Forgot your password?</a>
+            <a href="/fleet/register">Register a fleet</a>
+          </nav>
         )}
       </section>
     </Layout>
   );
 }
 
-function JobForm({ drivers, job, saved }: { drivers: Driver[]; job?: Job; saved: () => void }) {
+function JobForm({
+  drivers,
+  trucks,
+  job,
+  saved,
+}: {
+  drivers: Driver[];
+  trucks: Truck[];
+  job?: Job;
+  saved: () => void;
+}) {
   const action = useAction();
   const [origin, setOrigin] = useState(job?.origin);
   const [destination, setDestination] = useState(job?.destination);
@@ -200,6 +255,10 @@ function JobForm({ drivers, job, saved }: { drivers: Driver[]; job?: Job; saved:
           origin,
           destination,
           driver: Number(values.get('driver')),
+          truck: Number(values.get('truck')) || null,
+          cargo_type: values.get('cargo_type'),
+          customer_name: values.get('customer_name'),
+          instructions: values.get('instructions'),
           load_weight_lb: Number(values.get('load')),
           departure: new Date(String(values.get('departure'))).toISOString(),
           deadline: new Date(String(values.get('deadline'))).toISOString(),
@@ -228,6 +287,19 @@ function JobForm({ drivers, job, saved }: { drivers: Driver[]; job?: Job; saved:
               .map((driver) => (
                 <option key={driver.id} value={driver.id}>
                   {driver.name}
+                </option>
+              ))}
+          </select>
+        </label>
+        <label>
+          Truck
+          <select name="truck" aria-label="Truck" defaultValue={job?.truck_id ?? ''}>
+            <option value="">Unassigned</option>
+            {trucks
+              .filter((truck) => truck.available || truck.id === job?.truck_id)
+              .map((truck) => (
+                <option key={truck.id} value={truck.id}>
+                  {truck.registration} · {truck.capacity_lb.toLocaleString()} lb
                 </option>
               ))}
           </select>
@@ -262,6 +334,20 @@ function JobForm({ drivers, job, saved }: { drivers: Driver[]; job?: Job; saved:
           />
         </label>
       </div>
+      <div className="fleet-fields">
+        <label>
+          Cargo type
+          <input name="cargo_type" maxLength={100} defaultValue={job?.cargo_type} />
+        </label>
+        <label>
+          Customer
+          <input name="customer_name" maxLength={150} defaultValue={job?.customer_name} />
+        </label>
+      </div>
+      <label>
+        Dispatch instructions
+        <textarea name="instructions" maxLength={1000} rows={3} defaultValue={job?.instructions} />
+      </label>
       <button className="fleet-primary" disabled={action.busy}>
         {job ? 'Save assignment' : 'Assign job'}
       </button>
@@ -272,6 +358,7 @@ function JobForm({ drivers, job, saved }: { drivers: Driver[]; job?: Job; saved:
 
 function Roster({ drivers, jobs, refresh }: { drivers: Driver[]; jobs: Job[]; refresh: () => void }) {
   const action = useAction();
+  const [editing, setEditing] = useState<Driver>();
   const [notice, setNotice] = useState('');
   const [setupUrl, setSetupUrl] = useState('');
   function invite(event: FormEvent<HTMLFormElement>) {
@@ -282,6 +369,12 @@ function Roster({ drivers, jobs, refresh }: { drivers: Driver[]; jobs: Job[]; re
     setSetupUrl('');
     void action.run(async () => {
       try {
+        if (editing) {
+          await fleet(`drivers/${editing.id}`, { name: values.name }, 'PATCH');
+          setEditing(undefined);
+          setNotice('Driver updated.');
+          return;
+        }
         const result = await fleet<{ setup_url?: string }>('drivers', values);
         form.reset();
         setSetupUrl(result.setup_url ? new URL(result.setup_url, location.origin).href : '');
@@ -296,20 +389,34 @@ function Roster({ drivers, jobs, refresh }: { drivers: Driver[]; jobs: Job[]; re
   return (
     <section className="fleet-panel">
       <h2>Drivers</h2>
-      <form className="fleet-form" onSubmit={invite}>
+      <form key={editing?.id ?? 'invite'} className="fleet-form" onSubmit={invite}>
         <div className="fleet-fields">
           <label>
             Name
-            <input name="name" required maxLength={150} />
+            <input name="name" required maxLength={150} defaultValue={editing?.name} />
           </label>
           <label>
             Email
-            <input name="email" type="email" required maxLength={150} />
+            <input
+              name="email"
+              type="email"
+              required
+              maxLength={150}
+              readOnly={Boolean(editing)}
+              defaultValue={editing?.email}
+            />
           </label>
         </div>
-        <button className="fleet-primary" disabled={action.busy}>
-          Invite driver
-        </button>
+        <div className="fleet-actions">
+          <button className="fleet-primary" disabled={action.busy}>
+            {editing ? 'Save driver' : 'Invite driver'}
+          </button>
+          {editing && (
+            <button type="button" onClick={() => setEditing(undefined)}>
+              Cancel edit
+            </button>
+          )}
+        </div>
       </form>
       {notice && <p role="status">{notice}</p>}
       {setupUrl && (
@@ -349,6 +456,9 @@ function Roster({ drivers, jobs, refresh }: { drivers: Driver[]; jobs: Job[]; re
                 </small>
               </div>
               <div className="fleet-actions">
+                <button type="button" disabled={action.busy} onClick={() => setEditing(driver)}>
+                  Edit driver
+                </button>
                 {driver.active && (
                   <button
                     disabled={action.busy}
@@ -436,8 +546,119 @@ function JobBoard({ jobs, admin }: { jobs: Job[]; admin: boolean }) {
   );
 }
 
+function TruckRoster({ trucks, refresh }: { trucks: Truck[]; refresh: () => void }) {
+  const action = useAction();
+  const [editing, setEditing] = useState<Truck>();
+  return (
+    <section className="fleet-panel">
+      <h2>Trucks</h2>
+      <form
+        key={editing?.id ?? 'new'}
+        className="fleet-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          const data = new FormData(form);
+          void action.run(async () => {
+            await fleet(
+              editing ? `trucks/${editing.id}` : 'trucks',
+              {
+                registration: data.get('registration'),
+                model: data.get('model'),
+                capacity_lb: Number(data.get('capacity')),
+                available: data.has('available'),
+              },
+              editing ? 'PATCH' : 'POST',
+            );
+            form.reset();
+            setEditing(undefined);
+            refresh();
+          });
+        }}
+      >
+        <div className="fleet-fields">
+          <label>
+            Registration
+            <input name="registration" required maxLength={32} defaultValue={editing?.registration} />
+          </label>
+          <label>
+            Model
+            <input name="model" required maxLength={100} defaultValue={editing?.model} />
+          </label>
+          <label>
+            Payload capacity (lb)
+            <input
+              name="capacity"
+              type="number"
+              min={1}
+              max={80000}
+              required
+              defaultValue={editing?.capacity_lb}
+            />
+          </label>
+          <label className="fleet-checkbox">
+            <input name="available" type="checkbox" defaultChecked={editing?.available ?? true} /> Available
+            for dispatch
+          </label>
+        </div>
+        <div className="fleet-actions">
+          <button className="fleet-primary" disabled={action.busy}>
+            {editing ? 'Save truck' : 'Add truck'}
+          </button>
+          {editing && (
+            <button type="button" onClick={() => setEditing(undefined)}>
+              Cancel edit
+            </button>
+          )}
+        </div>
+      </form>
+      {action.message && <p role="alert">{action.message}</p>}
+      <ul className="fleet-list">
+        {trucks.map((truck) => (
+          <li key={truck.id}>
+            <div>
+              <strong>{truck.registration}</strong>
+              <small>
+                {truck.model} · {truck.capacity_lb.toLocaleString()} lb ·{' '}
+                {truck.available ? 'Available' : 'Unavailable'}
+              </small>
+            </div>
+            <div className="fleet-actions">
+              <button disabled={action.busy} onClick={() => setEditing(truck)}>
+                Edit truck
+              </button>
+              <button
+                disabled={action.busy}
+                onClick={() => {
+                  if (!confirm(`Remove truck ${truck.registration}?`)) return;
+                  void action.run(async () => {
+                    await fleet(`trucks/${truck.id}`, undefined, 'DELETE');
+                    if (editing?.id === truck.id) setEditing(undefined);
+                    refresh();
+                  });
+                }}
+              >
+                Remove
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function useTrucks(user: User) {
+  return useQuery({
+    queryKey: ['fleet-trucks', user.id],
+    queryFn: () => fleet<Truck[]>('trucks'),
+    enabled: user.role === 'admin',
+  });
+}
+
 function Dashboard({ user }: { user: User }) {
   const admin = user.role === 'admin';
+  const trucks = useTrucks(user);
   const jobs = useQuery({
     queryKey: ['fleet-jobs', user.id],
     queryFn: () => fleet<Job[]>('jobs'),
@@ -451,6 +672,26 @@ function Dashboard({ user }: { user: User }) {
   return (
     <Layout user={user}>
       <h1>{admin ? user.company : 'Driver workspace'}</h1>
+      {admin && jobs.data && drivers.data && trucks.data && (
+        <dl className="fleet-overview" aria-label="Fleet overview">
+          <div>
+            <dt>Trucks</dt>
+            <dd>{trucks.data.length}</dd>
+          </div>
+          <div>
+            <dt>Active drivers</dt>
+            <dd>{drivers.data.filter((driver) => driver.active).length}</dd>
+          </div>
+          <div>
+            <dt>Active deliveries</dt>
+            <dd>{jobs.data.filter((job) => !closed(job)).length}</dd>
+          </div>
+          <div>
+            <dt>At risk or overdue</dt>
+            <dd>{jobs.data.filter((job) => ['at_risk', 'overdue'].includes(job.risk)).length}</dd>
+          </div>
+        </dl>
+      )}
       {(jobs.isError || (admin && drivers.isError)) && <p role="alert">Unable to load fleet data.</p>}
       {jobs.isPending && <p role="status">Loading jobs…</p>}
       {jobs.data && <JobBoard jobs={jobs.data} admin={admin} />}
@@ -458,14 +699,22 @@ function Dashboard({ user }: { user: User }) {
         <div className="fleet-grid">
           <section className="fleet-panel">
             <h2>Assign a job</h2>
-            <JobForm drivers={drivers.data} saved={() => void jobs.refetch()} />
+            <JobForm drivers={drivers.data} trucks={trucks.data ?? []} saved={() => void jobs.refetch()} />
           </section>
           <Roster drivers={drivers.data} jobs={jobs.data ?? []} refresh={() => void drivers.refetch()} />
         </div>
       )}
+      {admin && trucks.isError && <p role="alert">Unable to load trucks.</p>}
+      {admin && trucks.data && <TruckRoster trucks={trucks.data} refresh={() => void trucks.refetch()} />}
     </Layout>
   );
 }
+
+const pickupSteps: Record<string, [string, string]> = {
+  assigned: ['accepted', 'Accept delivery'],
+  accepted: ['arrived', 'Arrived at pickup'],
+  arrived: ['picked_up', 'Mark picked up'],
+};
 
 function Progress({ job, admin, refresh }: { job: Job; admin: boolean; refresh: () => void }) {
   const action = useAction();
@@ -477,6 +726,7 @@ function Progress({ job, admin, refresh }: { job: Job; admin: boolean; refresh: 
     });
   }
   if (closed(job)) return null;
+  const pickupStep = pickupSteps[job.status];
   return (
     <section className="fleet-panel">
       <h2>Update job</h2>
@@ -495,6 +745,11 @@ function Progress({ job, admin, refresh }: { job: Job; admin: boolean; refresh: 
             <a className="fleet-primary" href={`/fleet/jobs/${job.id}/plan`}>
               Open in route planner
             </a>
+            {pickupStep && (
+              <button disabled={action.busy} onClick={() => update({ status: pickupStep[0] })}>
+                {pickupStep[1]}
+              </button>
+            )}
             {job.status !== 'en_route' && (
               <button disabled={action.busy} onClick={() => update({ status: 'en_route' })}>
                 Mark en route
@@ -543,6 +798,7 @@ function Progress({ job, admin, refresh }: { job: Job; admin: boolean; refresh: 
 
 function JobPage({ user, id, planning }: { user: User; id: string; planning: boolean }) {
   const admin = user.role === 'admin';
+  const trucks = useTrucks(user);
   const detail = useQuery({ queryKey: ['fleet-job', user.id, id], queryFn: () => fleet<Job>(`jobs/${id}`) });
   const drivers = useQuery({
     queryKey: ['fleet-drivers', user.id],
@@ -605,6 +861,32 @@ function JobPage({ user, id, planning }: { user: User; id: string; planning: boo
             <dt>Driver</dt>
             <dd>{job.driver_name}</dd>
           </div>
+          {job.truck_registration && (
+            <div>
+              <dt>Truck</dt>
+              <dd>{job.truck_registration}</dd>
+            </div>
+          )}
+          {job.cargo_type && (
+            <div>
+              <dt>Cargo</dt>
+              <dd>
+                {job.cargo_type} · {job.load_weight_lb.toLocaleString()} lb
+              </dd>
+            </div>
+          )}
+          {job.customer_name && (
+            <div>
+              <dt>Customer</dt>
+              <dd>{job.customer_name}</dd>
+            </div>
+          )}
+          {job.instructions && (
+            <div>
+              <dt>Dispatch instructions</dt>
+              <dd>{job.instructions}</dd>
+            </div>
+          )}
           <div>
             <dt>Progress</dt>
             <dd className="fleet-state">{label(job.status)}</dd>
@@ -650,6 +932,7 @@ function JobPage({ user, id, planning }: { user: User; id: string; planning: boo
         <section className="fleet-panel">
           <h2>Edit assignment</h2>
           <JobForm
+            trucks={trucks.data ?? []}
             key={job.updated_at}
             drivers={drivers.data}
             job={job}
@@ -686,10 +969,10 @@ export default function Fleet() {
   });
   const user = session.data?.user;
   const path = location.pathname.replace(/\/$/, '');
-  const reset = path === '/fleet/reset';
+  const accountPage = ['/fleet/reset', '/fleet/recover', '/fleet/register'].includes(path);
   useEffect(() => {
-    if (!user && session.isSuccess && !reset && path !== '/fleet') location.replace('/fleet');
-  }, [user, session.isSuccess, reset, path]);
+    if (!user && session.isSuccess && !accountPage && path !== '/fleet') location.replace('/fleet');
+  }, [user, session.isSuccess, accountPage, path]);
   if (session.isPending)
     return (
       <Layout>
@@ -702,7 +985,8 @@ export default function Fleet() {
         <p role="alert">Unable to load your session.</p>
       </Layout>
     );
-  if (!user || reset) return <Account reset={reset} emailEnabled={Boolean(session.data?.email_enabled)} />;
+  if (!user || accountPage)
+    return <Account page={path} emailEnabled={Boolean(session.data?.email_enabled)} />;
   const job = path.match(/^\/fleet\/jobs\/(\d+)(\/plan)?$/);
   return job ? <JobPage user={user} id={job[1]} planning={Boolean(job[2])} /> : <Dashboard user={user} />;
 }

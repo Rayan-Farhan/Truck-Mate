@@ -21,6 +21,64 @@ DESTINATION = {"label": "Denver, CO", "lat": 39.7392, "lon": -104.9903}
     ORIGIN_VERIFY_TOKEN="",
 )
 class FleetWorkflowTests(TestCase):
+    def test_password_recovery_sends_email_only_for_an_existing_account(self):
+        known = self.request(
+            "POST", "password/request", {"username": self.admin.user.email}
+        )
+        unknown = self.request(
+            "POST", "password/request", {"username": "absent@example.com"}
+        )
+        self.assertEqual(known.status_code, 200)
+        self.assertEqual(known.json(), unknown.json())
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, [self.admin.user.email])
+        self.assertIn("https://truckmate.example/fleet/reset#", mail.outbox[0].body)
+
+    def test_registration_creates_isolated_admin_and_allows_sign_in(self):
+        email = "new-admin@example.com"
+        data = {
+            "company": "New Carrier",
+            "email": email,
+            "password": "A-strong-new-fleet#8",
+        }
+        response = self.request("POST", "register", data)
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(self.request("POST", "register", data).status_code, 409)
+        response = self.request(
+            "POST", "login", {"username": email, "password": data["password"]}
+        )
+        self.assertEqual(response.json()["user"]["role"], "admin")
+        self.assertEqual(response.json()["user"]["company"], "New Carrier")
+        self.assertEqual(self.request("GET", "drivers").json(), [])
+
+    def test_truck_assignments_enforce_capacity_and_company(self):
+        self.client.force_login(self.admin.user)
+        truck = {"registration": "TM-101", "model": "Cascadia", "capacity_lb": 10000}
+        result = self.request("POST", "trucks", truck)
+        self.assertEqual(result.status_code, 201, result.content)
+        pk = result.json()["id"]
+        self.assertEqual(
+            self.request("POST", "jobs", {**self.job_input, "truck": pk}).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.request("PATCH", f"trucks/{pk}", {"capacity_lb": 20000}).status_code,
+            200,
+        )
+        result = self.request("POST", "jobs", {**self.job_input, "truck": pk})
+        self.assertEqual(result.status_code, 201, result.content)
+        self.assertEqual(result.json()["truck_registration"], "TM-101")
+        self.assertEqual(
+            self.request("POST", "jobs", {**self.job_input, "truck": pk}).status_code,
+            400,
+        )
+        self.assertEqual(self.request("DELETE", f"trucks/{pk}").status_code, 400)
+        self.client.force_login(self.outside.user)
+        self.assertEqual(self.request("GET", "trucks").json(), [])
+        self.assertEqual(
+            self.request("PATCH", f"trucks/{pk}", {"available": False}).status_code, 404
+        )
+
     def setUp(self):
         cache.clear()
         self.company = Company.objects.create(name="TruckMate Test Fleet")
