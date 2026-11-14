@@ -15,3 +15,4 @@ playwright-report/
 *.log
 .DS_Store
 docs/
+*.sqlite3

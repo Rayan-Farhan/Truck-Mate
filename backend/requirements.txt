@@ -7,4 +7,5 @@ boto3>=1.40,<2
 python-dotenv>=1.1,<2
 whitenoise>=6.9,<7
 tzdata>=2025.2
+psycopg[binary]>=3.3,<3.4
 gunicorn>=23,<24; sys_platform != 'win32'

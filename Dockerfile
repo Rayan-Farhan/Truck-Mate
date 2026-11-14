@@ -16,4 +16,5 @@ RUN mkdir -p /app/backend/staticfiles && useradd --uid 10001 --create-home truck
 USER truckmate
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=2)"
+ENTRYPOINT ["/bin/sh", "/app/backend/start.sh"]
 CMD ["gunicorn", "--chdir", "backend", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "1", "--threads", "4", "--timeout", "60", "--access-logfile", "-"]

@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.conf import settings
 from django.http import FileResponse, JsonResponse
+from django.views.decorators.cache import never_cache
 from rest_framework import serializers
 from rest_framework.decorators import api_view, throttle_classes
 from rest_framework.response import Response
@@ -144,6 +145,14 @@ class AnalysisSerializer(serializers.Serializer):
 @api_view(["GET"])
 @throttle_classes([])
 def health(request):
+    if settings.DATABASES["default"]["ENGINE"] == "django.db.backends.postgresql":
+        from django.db import DatabaseError, connection
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+        except DatabaseError:
+            return Response({"status": "unavailable"}, status=503)
     return Response({"status": "ok"})
 
 
@@ -186,6 +195,7 @@ def briefing(request, analysis_id):
     return Response(briefings.briefing(services.get_analysis(analysis_id)))
 
 
+@never_cache
 def index(request):
     path = Path(settings.FRONTEND_DIST) / "index.html"
     if path.is_file():

@@ -8,10 +8,21 @@ export class ApiError extends Error {
     super(message);
   }
 }
-export async function request<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+export async function request<T>(
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+  method?: string,
+): Promise<T> {
+  const headers = new Headers();
+  if (body !== undefined) headers.set('Content-Type', 'application/json');
+  if (body !== undefined && path.startsWith('/fleet/')) {
+    const cookie = document.cookie.split('; ').find((value) => value.startsWith('csrftoken='));
+    if (cookie) headers.set('X-CSRFToken', decodeURIComponent(cookie.slice('csrftoken='.length)));
+  }
   const response = await fetch(`/api${path}`, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    method: method ?? (body === undefined ? 'GET' : 'POST'),
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
   });
@@ -23,8 +34,13 @@ export async function request<T>(path: string, body?: unknown, signal?: AbortSig
   }
   if (!response.ok) {
     const error = data.error ?? {};
+    const fieldMessage = Object.values(error.fields ?? {})
+      .flat()
+      .find((value): value is string => typeof value === 'string');
     throw new ApiError(
-      error.message ?? 'The request could not be completed.',
+      (path.startsWith('/fleet/') ? fieldMessage : undefined) ??
+        error.message ??
+        'The request could not be completed.',
       error.code ?? 'REQUEST_FAILED',
       error.fields ?? {},
     );
